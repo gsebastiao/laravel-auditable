@@ -1,0 +1,8 @@
+# Não incluir no dist (pacote instalado via composer) o que só serve ao desenvolvimento
+/tests export-ignore
+/.github export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/phpunit.xml export-ignore
+/.editorconfig export-ignore
+*.md diff=markdown
