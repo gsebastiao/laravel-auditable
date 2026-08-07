@@ -7,6 +7,7 @@ namespace Gsebastiao\Auditable;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Support\ServiceProvider;
+use Gsebastiao\Auditable\Console\Commands\PublishAuditTableJs;
 use Gsebastiao\Auditable\Contracts\AuditRepository;
 use Gsebastiao\Auditable\Contracts\BatchIdGenerator;
 use Gsebastiao\Auditable\Contracts\ContextResolver;
@@ -80,6 +81,30 @@ final class AuditableServiceProvider extends ServiceProvider
                 __DIR__.'/../database/migrations/create_audits_table.php.stub'
                     => $this->migrationPath('create_audits_table'),
             ], 'auditable-migrations');
+
+            // Widget JS OPCIONAL (modal de histórico pronto). Duas formas de
+            // publicar o mesmo arquivo, à escolha do dev:
+            //
+            //   php artisan vendor:publish --tag=auditable-js
+            //     Convenção padrão do Laravel. Caminho FIXO (public/assets/js),
+            //     porque vendor:publish resolve o destino no boot do provider,
+            //     antes de qualquer config publicada pelo app ter sido carregada.
+            //
+            //   php artisan auditable:publish-js
+            //     Comando próprio do pacote. Lê config('auditable.js.publish_path')
+            //     em tempo de execução, então respeita o path configurado (ou
+            //     --path=... para uma execução pontual).
+            //
+            // Nenhuma das duas é necessária para o pacote funcionar — veja o
+            // README, seção "Widget JS opcional".
+            $this->publishes([
+                __DIR__.'/plugin/audit-table.init.js'
+                    => public_path('assets/js/audit-table.init.js'),
+            ], 'auditable-js');
+
+            $this->commands([
+                PublishAuditTableJs::class,
+            ]);
         }
     }
 

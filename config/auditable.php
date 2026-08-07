@@ -87,6 +87,24 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Widget JS (OPCIONAL)
+    |--------------------------------------------------------------------------
+    | Nada aqui é obrigatório. O pacote grava e consulta auditoria sem
+    | precisar de nenhum arquivo JS — esta seção só existe para quem quiser
+    | usar o modal de histórico pronto (veja o README, seção "Widget JS
+    | opcional").
+    |
+    | 'publish_path' é onde `php artisan auditable:publish-js` copia o
+    | arquivo dentro de public/. Relativo a public/, sem barra inicial ou
+    | final. Ex.: com o padrão abaixo, o arquivo cai em
+    | public/assets/js/audit-table.init.js.
+    */
+    'js' => [
+        'publish_path' => 'assets/js',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Debug de falhas
     |--------------------------------------------------------------------------
     | Controla o conteúdo do campo debug_info gravado por $model->auditFailure().

@@ -336,6 +336,248 @@ Peça só o que a grelha vai mostrar. Índice recomendado na tabela de auditoria
 > **Quando usar o quê:** MUITAS linhas, um resumo por linha → `AuditColumnJoiner`.
 > UMA linha, o histórico todo → `$model->audits` / `auditsFor()`.
 
+## Widget JS: um modal de histórico pronto (100% OPCIONAL)
+
+> **Isto é totalmente opcional.** Tudo que você leu até aqui — gravar auditoria,
+> consultar `$model->audits`, montar colunas com `AuditColumnJoiner` — funciona
+> 100% sem nada do que vem a seguir. Esta seção existe só para quem não quer
+> escrever HTML/CSS/JS do zero para mostrar esse histórico numa tela. Se você
+> prefere montar sua própria interface (ou já tem uma), pode pular esta seção
+> inteira sem perder nenhuma funcionalidade do pacote.
+
+### O que é
+
+Um único arquivo JavaScript (`audit-table.init.js`) que abre um **modal**
+("popup") mostrando o histórico de um registro, quando você clica em algum
+botão da sua tela. Ele:
+
+- **Não tem nenhuma dependência.** Sem jQuery, sem Bootstrap, sem
+  DataTables. Um `<script>` só, e pronto — o HTML do modal, o CSS e o
+  comportamento (busca, filtro, paginação) são todos gerados pelo próprio
+  arquivo, em tempo real, quando você abre o modal.
+- **Não conflita com o visual do seu site.** Todo o CSS injetado usa nomes de
+  classe exclusivos, sempre começando com `ga-audit-` (ex.: `ga-audit-modal`,
+  `ga-audit-table`). Nunca usa nomes genéricos como `.modal` ou `.table`, que
+  são exatamente os nomes que frameworks como Bootstrap ou AdminLTE já usam —
+  então não existe risco de o CSS do seu template "vazar" para dentro do
+  modal, nem o contrário.
+- **Funciona em qualquer tamanho de tela.** Em celular, o modal ocupa a tela
+  inteira (mais fácil de usar com o dedo); em telas maiores, aparece
+  centralizado como um popup comum.
+
+### Os dois modais
+
+O arquivo registra um objeto global chamado `GaAudit`, com **dois widgets
+independentes**. Você pode usar um, o outro, ou os dois — são pensados para
+públicos diferentes:
+
+| Widget | Pra quem | O que mostra |
+| --- | --- | --- |
+| `GaAudit.full` | Quem tem permissão de auditor/admin | Histórico completo: busca, filtro por ação, paginação, alterações agrupadas por batch |
+| `GaAudit.simple` | Qualquer usuário do sistema | Lista direta e enxuta: o quê, quem, quando — sem filtros |
+
+### Passo 1 — Publicar o arquivo
+
+O arquivo já vem dentro do pacote (em `vendor/gsebastiao/laravel-auditable/src/plugin/audit-table.init.js`),
+mas o navegador só consegue acessar arquivos que estão dentro da pasta
+`public/` do seu projeto Laravel. Por isso existe um comando que **copia** o
+arquivo para lá:
+
+```
+php artisan auditable:publish-js
+```
+
+Por padrão, isso cria o arquivo em `public/assets/js/audit-table.init.js`.
+
+**Quer publicar em outro lugar?** Duas formas:
+
+```
+# Só para esta execução (não muda nada permanentemente):
+php artisan auditable:publish-js --path=js/vendor/auditoria
+
+# Para sempre, editando o config publicado (config/auditable.php):
+'js' => [
+    'publish_path' => 'js/vendor/auditoria',
+],
+```
+
+**Atualizando o pacote e quer pegar uma versão nova do arquivo JS?** Rode de
+novo com `--force`, para sobrescrever o que já está publicado:
+
+```
+php artisan auditable:publish-js --force
+```
+
+> **Alternativa:** se seu projeto já usa um bundler (Vite, Mix, Webpack…) e
+> você prefere que o `audit-table.init.js` passe pelo MESMO pipeline de build
+> do resto do seu JS, ignore o comando acima e simplesmente copie o arquivo
+> de dentro de `vendor/gsebastiao/laravel-auditable/src/plugin/` para dentro
+> da sua pasta de assets (ex.: `resources/js/vendor/`), e importe normalmente.
+
+### Passo 2 — Incluir na página
+
+No seu layout Blade (ex.: `resources/views/layouts/app.blade.php`), antes do
+`</body>`:
+
+```
+<script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
+```
+
+(Troque `assets/js` pelo caminho que você escolheu no Passo 1, se mudou o
+padrão.)
+
+### Passo 3 — Criar a rota que alimenta o modal
+
+O widget JS **não sabe nada sobre o seu banco de dados** — ele só sabe fazer
+uma requisição `POST` para uma URL que você fornece, e espera um JSON de
+volta num formato específico. Quem monta essa resposta é uma rota Laravel
+comum, que você escreve, chamando os métodos do pacote que você já viu nas
+seções anteriores deste README.
+
+**Para o modal `GaAudit.full`** (histórico completo, agrupado por batch):
+
+```
+// routes/web.php
+use App\Models\Produto;
+use Illuminate\Http\Request;
+
+Route::post('/audit/readGrouped', function (Request $request) {
+    $groups = Produto::operationFor($request->input('id'))
+        ->get()
+        ->groupBy('batch_id')
+        ->map(fn ($actions, $batchId) => [
+            'batch_id' => $batchId,
+            'actions' => $actions->map(fn ($audit) => [
+                'action' => $audit->event,
+                'type' => 'success',
+                'user_id' => $audit->user_id,
+                'created_at' => $audit->created_at->format('d/m/Y H:i'),
+                'changes' => $audit->changes,
+            ]),
+        ])
+        ->values();
+
+    return response()->json([
+        'record_id' => $request->input('id'),
+        'groups' => $groups,
+    ]);
+})->middleware('auth'); // proteja com permissão de auditor
+```
+
+**Para o modal `GaAudit.simple`** (lista enxuta, sem agrupar):
+
+```
+// routes/web.php
+use App\Models\Produto;
+use Illuminate\Http\Request;
+
+Route::post('/audit/read', function (Request $request) {
+    $audits = Produto::auditsFor($request->input('id'))
+        ->latest()
+        ->limit(50)
+        ->get()
+        ->map(fn ($audit) => [
+            'action' => $audit->event,
+            'user_id' => $audit->user_id,
+            'created_at' => $audit->created_at->format('d/m/Y H:i'),
+        ]);
+
+    return response()->json(['audits' => $audits]);
+})->middleware('auth');
+```
+
+> Os exemplos acima usam nomes de rota (`/audit/readGrouped`, `/audit/read`)
+> só como sugestão — use os nomes e o middleware que fizerem sentido no seu
+> projeto. O que importa é o **formato do JSON de resposta**, não a URL em
+> si. Se preferir, use um Controller normal em vez de uma Closure na rota.
+
+### Passo 4 — Abrir o modal
+
+Duas formas, à sua escolha:
+
+**Forma A — atributos `data-*` (não precisa escrever JS nenhum):**
+
+```
+<button
+    data-ga-audit="full"
+    data-ga-audit-id="{{ $produto->id }}"
+    data-ga-audit-url="/audit/readGrouped">
+    Ver histórico completo
+</button>
+
+<button
+    data-ga-audit="simple"
+    data-ga-audit-id="{{ $produto->id }}"
+    data-ga-audit-url="/audit/read">
+    Ver histórico
+</button>
+```
+
+O widget já escuta cliques em qualquer elemento com `data-ga-audit` na
+página — não precisa registrar nada manualmente.
+
+**Forma B — chamando via JavaScript (mais controle):**
+
+```
+document.getElementById('meuBotao').addEventListener('click', function () {
+    GaAudit.full.open({
+        endpoint: '/audit/readGrouped',
+        id: 42,
+        title: 'Histórico do Produto #42', // opcional
+    });
+});
+```
+
+> `title` é opcional em ambas as formas. Sem ele, `GaAudit.full` usa
+> "Histórico de Auditoria" e `GaAudit.simple` usa "Auditoria do Registro"
+> como título padrão — passe `title` (ou `data-ga-audit-title` na Forma A)
+> só quando quiser um texto diferente desse.
+
+### O modal não precisa de nenhum HTML na página
+
+Ao contrário de um modal Bootstrap tradicional, você **não** precisa deixar
+um `<div id="algumModal">...</div>` escondido em algum lugar do layout. O
+widget cria todo o HTML do modal em memória quando você abre, e o remove por
+completo quando você fecha. Isso é o que a pergunta original sobre
+"integrar o modal dentro do plugin" resolve: zero HTML externo, zero
+configuração de layout, funciona em qualquer página onde o `<script>` esteja
+incluído.
+
+### Customizando cores e ícones
+
+O visual usa variáveis CSS, então dá pra ajustar cor, raio de borda etc. sem
+tocar no arquivo do pacote — basta sobrescrever no CSS do seu próprio site:
+
+```
+:root {
+    --ga-audit-accent: #7c3aed;   /* cor de destaque (botões, foco, paginação) */
+    --ga-audit-radius: 4px;       /* cantos do modal */
+}
+```
+
+Os ícones (lupa da busca, setas da paginação, "x" de fechar) são caracteres
+Unicode simples por padrão — leves e sem depender de nenhuma fonte de ícone
+externa. Se preferir usar SVG ou outra fonte de ícones, sobrescreva antes de
+abrir o primeiro modal:
+
+```
+<script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
+<script>
+    GaAudit.icons.close = '<svg width="14" height="14">...</svg>';
+</script>
+```
+
+### Sobre o idioma dos textos
+
+Os textos fixos da interface (rótulos "Ação:", "Linhas:", "Buscar:",
+cabeçalhos de coluna, mensagens como "Carregando…" ou "Nenhum resultado
+encontrado") estão em português, fixos no arquivo. Só o `title` do modal é
+customizável hoje (veja o Passo 4 acima). Se seu projeto precisa desses
+textos em outro idioma, por enquanto a forma de fazer isso é editar o arquivo
+publicado diretamente — ele é só JavaScript comum, sem etapa de build. Tornar
+esses textos configuráveis é algo que pode entrar em uma versão futura do
+pacote.
+
 ## Sobrevivendo a um hard delete: o retrato de restauro
 
 A tabela de auditoria é **append-only e imutável** — de propósito, ela **não** usa
@@ -580,6 +822,14 @@ Model::operationFor($id)->get();            // idem, só com o id
 $model->batchOf();                          // só o id do batch
 Audit::currentBatch();                      // batch aberto (p/ propagar a filas)
 Audit::useBatch($batchId);                  // reabrir batch (dentro de uma job)
+```
+
+```bash
+# Widget JS opcional (modal de histórico pronto) — veja "Widget JS: um modal
+# de histórico pronto" acima. Publica audit-table.init.js em public/:
+php artisan auditable:publish-js
+php artisan auditable:publish-js --path=outro/caminho   # só nesta execução
+php artisan auditable:publish-js --force                # sobrescreve o já publicado
 ```
 
 ## Licença
@@ -892,6 +1142,249 @@ only for what the grid will show. Recommended index on the audit table:
 > **Which to use:** MANY rows, one summary per row → `AuditColumnJoiner`. ONE row,
 > the whole history → `$model->audits` / `auditsFor()`.
 
+## JS widget: a ready-made history modal (100% OPTIONAL)
+
+> **This is entirely optional.** Everything you've read so far — recording
+> audits, querying `$model->audits`, building columns with `AuditColumnJoiner`
+> — works 100% without anything below. This section exists only for people who
+> don't want to write HTML/CSS/JS from scratch to show that history on a
+> screen. If you'd rather build your own interface (or already have one), you
+> can skip this entire section without losing any of the package's
+> functionality.
+
+### What it is
+
+A single JavaScript file (`audit-table.init.js`) that opens a **modal**
+(popup) showing a record's history when you click some button on your page.
+It:
+
+- **Has zero dependencies.** No jQuery, no Bootstrap, no DataTables. Just one
+  `<script>` tag — the modal's HTML, CSS, and behavior (search, filter,
+  pagination) are all generated by the file itself, in real time, when you
+  open the modal.
+- **Never clashes with your site's look.** All injected CSS uses exclusive
+  class names, always prefixed with `ga-audit-` (e.g. `ga-audit-modal`,
+  `ga-audit-table`). It never uses generic names like `.modal` or `.table` —
+  exactly the names frameworks like Bootstrap or AdminLTE already use — so
+  there's no risk of your template's CSS leaking into the modal, or the
+  other way around.
+- **Works on any screen size.** On mobile, the modal takes up the whole
+  screen (easier to use with a finger); on larger screens, it shows up
+  centered like a regular popup.
+
+### The two modals
+
+The file registers a global object called `GaAudit`, with **two independent
+widgets**. Use one, the other, or both — they're built for different
+audiences:
+
+| Widget | For whom | What it shows |
+| --- | --- | --- |
+| `GaAudit.full` | Auditors/admins with elevated permissions | Full history: search, filter by action, pagination, changes grouped by batch |
+| `GaAudit.simple` | Any regular user | A short, direct list: what, who, when — no filters |
+
+### Step 1 — Publish the file
+
+The file already ships inside the package (at
+`vendor/gsebastiao/laravel-auditable/src/plugin/audit-table.init.js`), but the
+browser can only reach files that live inside your Laravel project's
+`public/` folder. That's what this command is for — it **copies** the file
+there:
+
+```
+php artisan auditable:publish-js
+```
+
+By default, this creates the file at `public/assets/js/audit-table.init.js`.
+
+**Want to publish somewhere else?** Two ways:
+
+```
+# Just for this one run (doesn't change anything permanently):
+php artisan auditable:publish-js --path=js/vendor/audit
+
+# Permanently, by editing the published config (config/auditable.php):
+'js' => [
+    'publish_path' => 'js/vendor/audit',
+],
+```
+
+**Updating the package and want the latest version of the JS file?** Run it
+again with `--force` to overwrite what's already published:
+
+```
+php artisan auditable:publish-js --force
+```
+
+> **Alternative:** if your project already uses a bundler (Vite, Mix,
+> Webpack…) and you'd rather have `audit-table.init.js` go through the SAME
+> build pipeline as the rest of your JS, skip the command above and just copy
+> the file from `vendor/gsebastiao/laravel-auditable/src/plugin/` into your
+> assets folder (e.g. `resources/js/vendor/`), then import it normally.
+
+### Step 2 — Include it on the page
+
+In your Blade layout (e.g. `resources/views/layouts/app.blade.php`), right
+before `</body>`:
+
+```
+<script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
+```
+
+(Swap `assets/js` for whatever path you chose in Step 1, if you changed the
+default.)
+
+### Step 3 — Create the route that feeds the modal
+
+The JS widget **knows nothing about your database** — it only knows how to
+make a `POST` request to a URL you give it, and expects a JSON response back
+in a specific shape. A regular Laravel route builds that response, calling
+the same package methods you've already seen throughout this README.
+
+**For the `GaAudit.full` modal** (full history, grouped by batch):
+
+```
+// routes/web.php
+use App\Models\Product;
+use Illuminate\Http\Request;
+
+Route::post('/audit/readGrouped', function (Request $request) {
+    $groups = Product::operationFor($request->input('id'))
+        ->get()
+        ->groupBy('batch_id')
+        ->map(fn ($actions, $batchId) => [
+            'batch_id' => $batchId,
+            'actions' => $actions->map(fn ($audit) => [
+                'action' => $audit->event,
+                'type' => 'success',
+                'user_id' => $audit->user_id,
+                'created_at' => $audit->created_at->format('Y-m-d H:i'),
+                'changes' => $audit->changes,
+            ]),
+        ])
+        ->values();
+
+    return response()->json([
+        'record_id' => $request->input('id'),
+        'groups' => $groups,
+    ]);
+})->middleware('auth'); // protect with auditor-level permissions
+```
+
+**For the `GaAudit.simple` modal** (short list, no grouping):
+
+```
+// routes/web.php
+use App\Models\Product;
+use Illuminate\Http\Request;
+
+Route::post('/audit/read', function (Request $request) {
+    $audits = Product::auditsFor($request->input('id'))
+        ->latest()
+        ->limit(50)
+        ->get()
+        ->map(fn ($audit) => [
+            'action' => $audit->event,
+            'user_id' => $audit->user_id,
+            'created_at' => $audit->created_at->format('Y-m-d H:i'),
+        ]);
+
+    return response()->json(['audits' => $audits]);
+})->middleware('auth');
+```
+
+> The route names above (`/audit/readGrouped`, `/audit/read`) are just
+> suggestions — use whatever names and middleware make sense for your
+> project. What matters is the **JSON response shape**, not the URL itself.
+> Feel free to use a regular Controller instead of a route Closure.
+
+### Step 4 — Open the modal
+
+Two ways, your choice:
+
+**Option A — `data-*` attributes (no JS to write at all):**
+
+```
+<button
+    data-ga-audit="full"
+    data-ga-audit-id="{{ $product->id }}"
+    data-ga-audit-url="/audit/readGrouped">
+    View full history
+</button>
+
+<button
+    data-ga-audit="simple"
+    data-ga-audit-id="{{ $product->id }}"
+    data-ga-audit-url="/audit/read">
+    View history
+</button>
+```
+
+The widget already listens for clicks on any element carrying
+`data-ga-audit` on the page — nothing to register manually.
+
+**Option B — calling it from JavaScript (more control):**
+
+```
+document.getElementById('myButton').addEventListener('click', function () {
+    GaAudit.full.open({
+        endpoint: '/audit/readGrouped',
+        id: 42,
+        title: 'History for Product #42', // optional
+    });
+});
+```
+
+> `title` is optional in both forms. Without it, `GaAudit.full` defaults to
+> "Histórico de Auditoria" and `GaAudit.simple` defaults to "Auditoria do
+> Registro" — pass `title` (or `data-ga-audit-title` in Option A) only when
+> you want different text.
+
+### The modal needs no HTML on the page
+
+Unlike a traditional Bootstrap modal, you do **not** need to leave a hidden
+`<div id="someModal">...</div>` somewhere in your layout. The widget builds
+the modal's entire HTML in memory when you open it, and removes it
+completely when you close it. That's what "integrating the modal into the
+plugin" means in practice: zero external HTML, zero layout setup, works on
+any page where the `<script>` tag is included.
+
+### Customizing colors and icons
+
+The look uses CSS variables, so you can tweak accent color, border radius,
+etc. without touching the package file at all — just override them in your
+own site's CSS:
+
+```
+:root {
+    --ga-audit-accent: #7c3aed;   /* accent color (buttons, focus ring, pagination) */
+    --ga-audit-radius: 4px;       /* modal corners */
+}
+```
+
+Icons (search magnifier, pagination arrows, close "x") are simple Unicode
+characters by default — lightweight, with no dependency on any external icon
+font. If you'd rather use SVGs or another icon set, override them before
+opening the first modal:
+
+```
+<script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
+<script>
+    GaAudit.icons.close = '<svg width="14" height="14">...</svg>';
+</script>
+```
+
+### A note on the UI language
+
+The interface's fixed text (labels like "Ação:", "Linhas:", "Buscar:",
+column headers, messages like "Carregando…" or "Nenhum resultado
+encontrado") is in Portuguese, hardcoded in the file. Only the modal's
+`title` is customizable today (see Step 4 above). If your project needs
+these strings in another language, for now the way to do it is to edit the
+published file directly — it's plain JavaScript, no build step involved.
+Making these strings configurable is something that may land in a future
+version of the package.
+
 ## Surviving a hard delete: the restore snapshot
 
 The audit table is **append-only and immutable** — by design, it does **not** use
@@ -1136,6 +1629,14 @@ Model::operationFor($id)->get();            // same, with just the id
 $model->batchOf();                          // just the batch id
 Audit::currentBatch();                      // open batch (to propagate to queues)
 Audit::useBatch($batchId);                  // reopen batch (inside a job)
+```
+
+```bash
+# Optional JS widget (ready-made history modal) — see "JS widget: a
+# ready-made history modal" above. Publishes audit-table.init.js to public/:
+php artisan auditable:publish-js
+php artisan auditable:publish-js --path=some/other/path   # this run only
+php artisan auditable:publish-js --force                  # overwrite what's published
 ```
 
 ## License
