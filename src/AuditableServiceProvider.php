@@ -36,7 +36,7 @@ final class AuditableServiceProvider extends ServiceProvider
                 auth: $app->make(AuthFactory::class),
                 tenantResolver: config('auditable.tenant.resolver'),
                 guard: config('auditable.auth_guard'),
-                defaultUserId: config('auditable.default_user_id'),
+                defaultUserId: config('auditable.default_created_by'),
             );
         });
 

@@ -7,7 +7,8 @@ namespace Gsebastiao\Auditable\Support;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Builder as QueryBuilder;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Collection;
+use InvalidArgumentException;
 
 /**
  * Anexa colunas de auditoria ("quem/quando") à query de LISTAGEM de um model.
@@ -53,6 +54,27 @@ use Illuminate\Support\Facades\DB;
  * nome de tabela. É o que garante que a auditoria do Produto não se misture com
  * a de outro model que porventura compartilhe ids. A morph class é resolvida
  * via $model->getMorphClass(), então morphMap customizado é respeitado.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * PORTABILIDADE (SQLite / PostgreSQL / MySQL) — E O QUE APPLY() EXIGE
+ * ─────────────────────────────────────────────────────────────────────────────
+ * As subconsultas de JOIN não usam nenhuma função específica de motor — nada de
+ * DATE_FORMAT, LOCATE, CONCAT ou SUBSTRING_INDEX (todas MySQL-only), que a
+ * versão anterior desta classe embutia no SQL. A coluna `_at` sai crua do
+ * banco; a formatação amigável (`$dateFormat`) e o encurtamento do nome (quando
+ * $userColumn = 'name') acontecem depois, em PHP, sobre as linhas já
+ * carregadas — via `afterQuery()` do Eloquent (Laravel 11+, ver PR #50587 do
+ * framework). Isso elimina qualquer SQL específico de motor das subconsultas.
+ *
+ * afterQuery() é uma API do Eloquent\Builder — Query\Builder puro (o que você
+ * pega em DB::table(...)) não a possui. Por isso apply() EXIGE um Eloquent
+ * Builder e lança InvalidArgumentException se receber um Query Builder puro,
+ * em vez de tentar adivinhar formatação de data/nome por motor de banco (o que
+ * reintroduziria SQL não-portável, só que espalhado e não testado, para um
+ * caso que nenhum exemplo deste README usa). Se seu caso de uso realmente
+ * precisa de um Query Builder puro, monte a query com DB::table() normalmente
+ * e formate created_at/created_by no PHP do seu lado — esta classe não cobre
+ * esse caminho.
  */
 final class AuditColumnJoiner
 {
@@ -78,9 +100,10 @@ final class AuditColumnJoiner
     /**
      * Aplica os JOINs de auditoria a uma query de listagem.
      *
-     * @param  Builder|QueryBuilder  $query
-     *         A query da grelha. Pode ser um Eloquent Builder (o caso comum,
-     *         Model::query()) ou um Query Builder puro.
+     * @param  Builder  $query
+     *         A query da grelha — precisa ser um Eloquent Builder (o caso comum,
+     *         Model::query()). Query Builder puro (DB::table()) não é aceito;
+     *         ver nota de portabilidade na classe.
      *
      * @param  class-string<Model>|Model  $model
      *         O model (instância ou nome de classe) cuja listagem está sendo
@@ -98,9 +121,10 @@ final class AuditColumnJoiner
      *         "primeiro + último" nome (evita nomes gigantes na grelha).
      *
      * @param  string  $dateFormat
-     *         Formato de data no padrão amigável (DD/MM/YYYY HH:i:s), convertido
-     *         para o do MySQL internamente. A data sai JÁ FORMATADA como string
-     *         — por isso os apelidos nunca colidem com colunas com cast.
+     *         Formato de data no padrão amigável (DD/MM/YYYY HH:i:s), aplicado em
+     *         PHP sobre o valor já carregado (ver nota de portabilidade acima). A
+     *         data sai JÁ FORMATADA como string — por isso os apelidos nunca
+     *         colidem com colunas com cast.
      *
      * @param  string|null  $primaryKey
      *         Coluna id da tabela principal para casar o JOIN. Default: a
@@ -122,7 +146,11 @@ final class AuditColumnJoiner
      * grelha é uma lixeira (withTrashed()/onlyTrashed()). Nesse caso, passe
      * explicitamente: actions: ['created', 'updated', 'deleted', 'restored'].
      *
-     * @return Builder|QueryBuilder  A mesma query, com as colunas anexadas.
+     * @return Builder  A mesma query, com as colunas anexadas e um afterQuery()
+     *         registrado para formatar `_at`/`_by` nas linhas.
+     *
+     * @throws InvalidArgumentException  Se $query for um Query Builder puro
+     *         (sem afterQuery() nativo) — ver nota de portabilidade na classe.
      */
     public static function apply(
         Builder|QueryBuilder $query,
@@ -132,16 +160,36 @@ final class AuditColumnJoiner
         string $dateFormat = 'DD/MM/YYYY HH:i:s',
         ?string $primaryKey = null,
         ?string $prefix = null,
-    ): Builder|QueryBuilder {
+    ): Builder {
+        if (! $query instanceof Builder) {
+            throw new InvalidArgumentException(
+                'AuditColumnJoiner::apply() exige um Eloquent Builder (Model::query()). '
+                . 'Query Builder puro (DB::table()) não tem afterQuery() nativo, então a '
+                . 'formatação de data/nome desta classe não tem como ser aplicada de forma '
+                . 'portável — ver o docblock da classe, seção "Portabilidade".'
+            );
+        }
+
         $model = is_string($model) ? new $model() : $model;
 
-        $auditTable  = config('auditable.table', 'audits');
-        $usersTable  = config('auditable.users_table', 'users');
-        $morphClass  = $model->getMorphClass();
-        $mainTable   = $model->getTable();
-        $mainKey     = $primaryKey ?? $model->getKeyName();
-        $mysqlFormat = self::toMysqlDateFormat($dateFormat);
-        $prefix      = $prefix ?? config('auditable.column_prefix', self::DEFAULT_COLUMN_PREFIX);
+        $auditTable = config('auditable.table', 'audits');
+        $usersTable = config('auditable.users_table', 'users');
+        $morphClass = $model->getMorphClass();
+        $mainTable  = $model->getTable();
+        $mainKey    = $primaryKey ?? $model->getKeyName();
+        $prefix     = $prefix ?? config('auditable.column_prefix', self::DEFAULT_COLUMN_PREFIX);
+
+        // Base para montar as subconsultas: sempre o Query Builder puro por
+        // trás do Eloquent Builder recebido (via getQuery()), nunca o
+        // DB::table() direto — assim a subconsulta herda a MESMA conexão do
+        // Eloquent Builder ($query), inclusive quando o model usa uma
+        // conexão não-default (config('auditable.connection'), tenancy
+        // por-database, etc.). newQuery() garante uma instância nova e
+        // limpa, sem herdar wheres/joins da query principal.
+        $baseQuery = $query->getQuery();
+
+        /** @var array<int, array{outputBy: string, outputAt: string}> $columns pares emitidos, para o afterQuery formatar */
+        $columns = [];
 
         foreach ($actions as $action) {
             $event    = strtolower($action);
@@ -156,39 +204,30 @@ final class AuditColumnJoiner
             $aggregate = ($event === 'created') ? 'MIN' : 'MAX';
 
             // Subconsulta: para cada subject_id, pega a linha-alvo daquele evento
-            // (via id agregado) e devolve created_by + a data já formatada. O JOIN
+            // (via id agregado) e devolve created_by + created_at CRU. O JOIN
             // interno reduz o histórico àquela única linha por registro, então o
-            // LEFT JOIN externo com a tabela principal fica 1:1.
-            //
-            // SEGURANÇA: subject_type e event entram como BINDINGS (?), nunca
-            // concatenados. Aparecem duas vezes cada (subconsulta interna + WHERE
-            // externo), então são quatro placeholders, na ordem em que o SQL os lê.
-            // O nome do formato de data (mysqlFormat) e os identificadores de
-            // tabela vêm da config/model — não de input — e ficam interpolados.
-            $subquery = DB::raw("(
-                SELECT
-                    a.subject_id,
-                    a.created_by,
-                    DATE_FORMAT(a.created_at, '{$mysqlFormat}') AS action_at
-                FROM {$auditTable} a
-                INNER JOIN (
-                    SELECT subject_id, {$aggregate}(id) AS target_id
-                    FROM {$auditTable}
-                    WHERE subject_type = ?
-                        AND event = ?
-                    GROUP BY subject_id
-                ) picked
-                    ON picked.subject_id = a.subject_id
-                   AND picked.target_id = a.id
-                WHERE a.subject_type = ?
-                    AND a.event = ?
-            ) {$alias}");
+            // LEFT JOIN externo com a tabela principal fica 1:1. Nenhuma função
+            // de formatação de data aqui — ver nota de portabilidade na classe.
+            $latestIds = $baseQuery->newQuery()
+                ->from($auditTable)
+                ->selectRaw("subject_id, {$aggregate}(id) as target_id")
+                ->where('subject_type', $morphClass)
+                ->where('event', $event)
+                ->groupBy('subject_id');
 
-            $query->leftJoin($subquery, "{$alias}.subject_id", '=', "{$mainTable}.{$mainKey}");
+            $latestRows = $baseQuery->newQuery()
+                ->from("{$auditTable} as a")
+                ->select('a.subject_id', 'a.created_by', 'a.created_at')
+                ->joinSub($latestIds, 'picked', function ($join) {
+                    $join->on('a.subject_id', '=', 'picked.subject_id')
+                        ->on('a.id', '=', 'picked.target_id');
+                })
+                ->where('a.subject_type', $morphClass)
+                ->where('a.event', $event);
 
-            // Bindings da subconsulta de join, na ordem dos ? acima.
-            $bindTarget = $query instanceof Builder ? $query->getQuery() : $query;
-            $bindTarget->addBinding([$morphClass, $event, $morphClass, $event], 'join');
+            $query->leftJoinSub($latestRows, $alias, function ($join) use ($alias, $mainTable, $mainKey) {
+                $join->on("{$alias}.subject_id", '=', "{$mainTable}.{$mainKey}");
+            });
 
             // JOIN com users para traduzir created_by → nome/email exibível.
             $query->leftJoin(
@@ -200,11 +239,39 @@ final class AuditColumnJoiner
 
             [$outputBy, $outputAt] = self::outputNames($event, $prefix);
 
-            $query->addSelect(
-                self::userColumnExpression($userColumn, $userAias, $outputBy),
-                DB::raw("{$alias}.action_at AS {$outputAt}")
-            );
+            $query->addSelect([
+                "{$userAias}.{$userColumn} as {$outputBy}",
+                "{$alias}.created_at as {$outputAt}",
+            ]);
+
+            $columns[] = ['outputBy' => $outputBy, 'outputAt' => $outputAt];
         }
+
+        // Formatação em PHP, sobre as linhas já carregadas — substitui o
+        // DATE_FORMAT/LOCATE/CONCAT/SUBSTRING_INDEX que a versão anterior
+        // embutia no SQL (MySQL-only). afterQuery() roda uma vez por
+        // resultado de query, não por linha buscada do banco, então não
+        // reintroduz N+1. Cada linha do resultado é um Model hidratado, mas
+        // as colunas extra do JOIN (audit_created_by, etc.) ficam acessíveis
+        // como atributos dinâmicos normalmente, então a leitura/escrita
+        // ->{$outputAt} funciona igual a um stdClass.
+        $query->afterQuery(function ($results) use ($columns, $userColumn, $dateFormat) {
+            $rows = $results instanceof Collection ? $results : collect($results);
+
+            $rows->each(function ($row) use ($columns, $userColumn, $dateFormat) {
+                foreach ($columns as ['outputBy' => $outputBy, 'outputAt' => $outputAt]) {
+                    if (isset($row->{$outputAt})) {
+                        $row->{$outputAt} = self::formatDate($row->{$outputAt}, $dateFormat);
+                    }
+
+                    if ($userColumn === 'name' && isset($row->{$outputBy})) {
+                        $row->{$outputBy} = self::shortenName($row->{$outputBy});
+                    }
+                }
+            });
+
+            return $results;
+        });
 
         return $query;
     }
@@ -257,44 +324,68 @@ final class AuditColumnJoiner
     }
 
     /**
-     * Expressão SQL da coluna "quem". Para a coluna `name`, encurta para
-     * "primeiro + último" nome — um "João da Silva Pereira" vira "João Pereira"
-     * na grelha, sem cortar informação essencial. Para qualquer outra coluna
-     * (email, username), devolve o valor direto.
+     * Encurta um nome completo para "primeiro + último" — um "João da Silva
+     * Pereira" vira "João Pereira" na grelha, sem cortar informação essencial.
+     * Sem espaço no valor (nome de uma palavra só, ou vazio/null), devolve como
+     * veio. Substitui a expressão SQL LOCATE/CONCAT/SUBSTRING_INDEX (MySQL-only)
+     * da versão anterior desta classe — mesmo resultado, calculado em PHP.
      */
-    private static function userColumnExpression(
-        string $userColumn,
-        string $userAlias,
-        string $outputBy,
-    ): \Illuminate\Database\Query\Expression {
-        if ($userColumn === 'name') {
-            return DB::raw("CASE
-                WHEN LOCATE(' ', {$userAlias}.name) > 0
-                THEN CONCAT(
-                    SUBSTRING_INDEX({$userAlias}.name, ' ', 1),
-                    ' ',
-                    SUBSTRING_INDEX({$userAlias}.name, ' ', -1)
-                )
-                ELSE {$userAlias}.name
-            END AS {$outputBy}");
+    private static function shortenName(?string $name): ?string
+    {
+        if ($name === null || $name === '') {
+            return $name;
         }
 
-        return DB::raw("{$userAlias}.{$userColumn} AS {$outputBy}");
+        $parts = preg_split('/\s+/', trim($name));
+
+        if ($parts === false || count($parts) < 2) {
+            return $name;
+        }
+
+        return $parts[0] . ' ' . $parts[count($parts) - 1];
     }
 
     /**
-     * Converte um formato de data amigável (DD/MM/YYYY HH:i:s) para o do MySQL
-     * (%d/%m/%Y %H:%i:%s). Tabela de mapeamento herdada do BaseModel original,
-     * mantida por compatibilidade de quem já usava aqueles tokens.
+     * Formata uma data/datetime crua (como devolvida pelo banco) no formato
+     * amigável pedido (ex.: DD/MM/YYYY HH:i:s). null passa direto. Substitui o
+     * DATE_FORMAT (MySQL-only) da versão anterior desta classe — mesmo
+     * resultado, calculado em PHP, portátil entre SQLite/PostgreSQL/MySQL.
+     *
+     * Tokens amigáveis suportados (ordem de checagem do mais longo para o
+     * mais curto, para YYYY não ser parcialmente consumido por Y):
+     *   YYYY, YY, MM, DD, HH, mm, ss, H, i, s, Y, m, d, y
      */
-    private static function toMysqlDateFormat(string $format): string
+    private static function formatDate(mixed $value, string $format): mixed
     {
-        $map = array_merge(
-            ['DD' => '%d', 'MM' => '%m', 'YYYY' => '%Y', 'YY' => '%y'],
-            ['mm' => '%i', 'd' => '%d', 'm' => '%m', 'y' => '%y', 'Y' => '%Y'],
-            ['H' => '%H', 'HH' => '%H', 'i' => '%i', 's' => '%s', 'ss' => '%s'],
-        );
+        if ($value === null || $value === '') {
+            return $value;
+        }
 
-        return strtr($format, $map);
+        $timestamp = is_numeric($value) ? (int) $value : strtotime((string) $value);
+
+        if ($timestamp === false) {
+            // Valor não reconhecido como data — devolve cru em vez de mascarar
+            // um problema de dados com uma string vazia ou um erro silencioso.
+            return $value;
+        }
+
+        // Tokens amigáveis (estilo BaseModel original) → tokens de date()/PHP.
+        // 'mm' = minuto e 'MM' = mês são propositalmente distintos (mesma
+        // convenção do formato amigável original); a ordem de busca abaixo
+        // (mais longo primeiro) evita que 'YYYY' seja parcialmente consumido
+        // pela entrada de 'Y'.
+        $map = [
+            'YYYY' => 'Y', 'YY' => 'y',
+            'MM' => 'm', 'DD' => 'd',
+            'HH' => 'H', 'mm' => 'i', 'ss' => 's',
+            'H' => 'H', 'i' => 'i', 's' => 's',
+            'Y' => 'Y', 'm' => 'm', 'd' => 'd', 'y' => 'y',
+        ];
+
+        uksort($map, fn ($a, $b) => strlen($b) <=> strlen($a));
+
+        $phpFormat = strtr($format, $map);
+
+        return date($phpFormat, $timestamp);
     }
 }

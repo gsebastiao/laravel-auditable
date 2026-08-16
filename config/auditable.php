@@ -74,7 +74,7 @@ return [
     |
     | Define como null para não preencher created_by nestes casos (coluna ficará NULL).
     */
-    'default_user_id' => env('AUDITABLE_DEFAULT_USER_ID', null),
+    'default_created_by' => env('AUDITABLE_DEFAULT_created_by', null),
 
     /*
     |--------------------------------------------------------------------------

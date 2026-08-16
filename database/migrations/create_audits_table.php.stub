@@ -24,7 +24,7 @@ return new class extends Migration {
             $table->json('debug_info')->nullable();
 
             // Responsável. Nullable = ação de sistema.
-            $table->unsignedBigInteger('user_id')->nullable()->index();
+            $table->unsignedBigInteger('created_by')->nullable()->index();
 
             // Coluna de tenant: só é criada se o modo por-coluna estiver ativo.
             if (config('auditable.tenant.enabled', false)) {

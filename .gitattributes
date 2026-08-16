@@ -1,3 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
 # Não incluir no dist (pacote instalado via composer) o que só serve ao desenvolvimento
 /tests export-ignore
 /.github export-ignore
@@ -5,4 +8,28 @@
 /.gitignore export-ignore
 /phpunit.xml export-ignore
 /.editorconfig export-ignore
-*.md diff=markdown
+
+# Arquivos específicos - forçar LF
+*.php text eol=lf
+*.md text eol=lf diff=markdown
+*.json text eol=lf
+*.xml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.stub text eol=lf
+*.txt text eol=lf
+
+# Binários
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.tar.gz binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

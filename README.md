@@ -677,18 +677,18 @@ Nestes casos, o `created_by` ficaria **vazio (NULL)**. Para resolver isso, o pac
 
 ```dotenv
 # .env
-AUDITABLE_DEFAULT_USER_ID=1
+AUDITABLE_DEFAULT_created_by=1
 
 **Passo 2** - Se preferir, defina diretamente no config/auditable.php:
 
 ```php
 // // config/auditable.php
-'default_user_id' => env('AUDITABLE_DEFAULT_USER_ID', 1),
+'default_created_by' => env('AUDITABLE_DEFAULT_created_by', 1),
 
 Mas por padrão o pacote no config ja defini o null para o usuário padrão como fallback.
 
 // config/auditable.php
-'default_user_id' => env('AUDITABLE_DEFAULT_USER_ID', null), // ID NULL como fallback
+'default_created_by' => env('AUDITABLE_DEFAULT_created_by', null), // ID NULL como fallback
 
 ## Multitenancy (opcional)
 
@@ -1504,7 +1504,7 @@ these cases, you can set a **default user** that will be used as a fallback:
 
 ```php
 // config/auditable.php
-'default_user_id' => env('AUDITABLE_DEFAULT_USER_ID', null),
+'default_created_by' => env('AUDITABLE_DEFAULT_created_by', null),
 
 ## Multitenancy (optional)
 
