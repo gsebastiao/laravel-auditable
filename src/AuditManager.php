@@ -208,10 +208,10 @@ final class AuditManager
             'event' => $event,
             'changes' => $changes,
             'debug_info' => $debugInfo,
-            'user_id' => $this->context->userId(),
+            'created_by' => $this->context->userId(),
             'tenant_id' => $this->context->tenantId(),
-            'created_at' => now(),
-            'updated_at' => now(),
+            'created_at' => now()->format("Y-m-d H:i:s"),
+            'updated_at' => now()->format("Y-m-d H:i:s"),
         ];
 
         // tenant_id só entra se tenancy por-coluna estiver ativo.

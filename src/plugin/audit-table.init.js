@@ -51,7 +51,7 @@
  *           {
  *             "action": "updated",
  *             "type": "success",
- *             "user_id": "Maria Silva",
+ *             "created_by": "Maria Silva",
  *             "created_at": "2026-08-01 14:32:10",
  *             "changes": { "Status": ["Ativo", "Bloqueado"] }
  *           }
@@ -64,7 +64,7 @@
  *
  *   {
  *     "audits": [
- *       { "action": "updated", "user_id": "Maria Silva", "created_at": "2026-08-01 14:32:10" }
+ *       { "action": "updated", "created_by": "Maria Silva", "created_at": "2026-08-01 14:32:10" }
  *     ]
  *   }
  *
@@ -658,7 +658,7 @@
 
                             var haystack = [
                                 audit.action,
-                                audit.user_id,
+                                audit.created_by,
                                 audit.created_at,
                                 group.batch_id,
                                 audit.changes ? (typeof audit.changes === 'string' ? audit.changes : JSON.stringify(audit.changes)) : ''
@@ -731,25 +731,71 @@
             function parseChanges(changesRaw) {
                 var lines = [];
                 var obj = changesRaw;
+
                 try {
                     if (typeof changesRaw === 'string') obj = JSON.parse(changesRaw);
-                    Object.keys(obj || {}).forEach(function (field) {
+                    if (!obj || typeof obj !== 'object') {
+                        lines.push(String(changesRaw));
+                        return lines;
+                    }
+
+                    // Campos que NUNCA mostramos
+                    var hideFields = ['id', 'created_at', 'updated_at', 'deleted_at', 'remember_token'];
+
+                    Object.keys(obj).forEach(function (field) {
+                        // Pula campos técnicos
+                        if (hideFields.indexOf(field) !== -1) return;
+
                         var val = obj[field];
                         var label = formatFieldLabel(field);
 
-                        if (Array.isArray(val) && val.length === 2) {
-                            var oldVal = field === 'password' ? '********' : val[0];
-                            var newVal = field === 'password' ? '********' : val[1];
-                            lines.push(label + ': ' + (oldVal != null ? oldVal : '') + ' \u2192 ' + (newVal != null ? newVal : ''));
-                        } else if (val && typeof val === 'object' && val.old !== undefined && val.new !== undefined) {
-                            var oldLabel = (val.old && (val.old.label || val.old.id)) || '';
-                            var newLabel = (val.new && (val.new.label || val.new.id)) || '';
-                            lines.push(label + ': ' + oldLabel + ' \u2192 ' + newLabel);
+                        // Caso 1: É uma senha?
+                        if (field === 'password') {
+                            lines.push(label + ': ********');
+                            return;
                         }
+
+                        // Caso 2: É um diff [old, new]?
+                        if (Array.isArray(val) && val.length === 2) {
+                            var oldVal = val[0];
+                            var newVal = val[1];
+
+                            // Se tiver label (ResolveMap), extrai
+                            if (typeof oldVal === 'object' && oldVal !== null && oldVal.label) {
+                                oldVal = oldVal.label;
+                            }
+                            if (typeof newVal === 'object' && newVal !== null && newVal.label) {
+                                newVal = newVal.label;
+                            }
+
+                            // Se são números ou strings, mostra como diff
+                            if (typeof oldVal !== 'object' && typeof newVal !== 'object') {
+                                lines.push(label + ': ' + (oldVal ?? '') + ' → ' + (newVal ?? ''));
+                            } else {
+                                // Fallback: mostra como JSON
+                                lines.push(label + ': ' + JSON.stringify(val));
+                            }
+                            return;
+                        }
+
+                        // Caso 3: É um objeto com label (ResolveMap em snapshot)?
+                        if (typeof val === 'object' && val !== null && val.label) {
+                            lines.push(label + ': ' + val.label);
+                            return;
+                        }
+
+                        // Caso 4: É um valor simples (snapshot)
+                        lines.push(label + ': ' + (val ?? ''));
                     });
+
+                    if (lines.length === 0) {
+                        lines.push('Registro criado (sem alterações visíveis)');
+                    }
+
                 } catch (e) {
                     lines.push(String(changesRaw));
                 }
+
                 return lines;
             }
 
@@ -848,7 +894,7 @@
                     batchCell.appendChild(buildBatchCell(group.batch_id));
 
                     var userCell = document.createElement('td');
-                    userCell.textContent = (lastAction && lastAction.user_id) || '\u2013';
+                    userCell.textContent = (lastAction && lastAction.created_by) || '\u2013';
 
                     var dateCell = document.createElement('td');
                     dateCell.className = 'ga-audit-cell-muted';
@@ -1130,7 +1176,7 @@
                     actionCell.textContent = audit.action || '\u2013';
 
                     var userCell = document.createElement('td');
-                    userCell.textContent = audit.user_id || '\u2013';
+                    userCell.textContent = audit.created_by || '\u2013';
 
                     var dateCell = document.createElement('td');
                     dateCell.className = 'ga-audit-cell-muted';

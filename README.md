@@ -115,7 +115,7 @@ Agora, em vez de `status_id: 2 → 5`, o log grava `Status: "Ativo" → "Bloquea
 ### Os três modos de tradução
 
 | Modo | Quando usar | Exemplo |
-|------|-------------|---------|
+| ------ | ------------- | --------- |
 | `direct` | A FK aponta direto para uma tabela com o nome | `status_id` → tabela `status` |
 | `join` | Precisa navegar por tabelas intermediárias | `estado_id` → `estados` → `paises` |
 | `alias` | Não é FK, só quer renomear o campo no log | `ativo` → "Situação" |
@@ -444,13 +444,13 @@ use Illuminate\Http\Request;
 Route::post('/audit/readGrouped', function (Request $request) {
     $groups = Produto::operationFor($request->input('id'))
         ->get()
-        ->groupBy('batch_id')
+        ->groupBy('batch')
         ->map(fn ($actions, $batchId) => [
             'batch_id' => $batchId,
             'actions' => $actions->map(fn ($audit) => [
                 'action' => $audit->event,
-                'type' => 'success',
-                'user_id' => $audit->user_id,
+                'created_by' => User::find($audit->created_by, ['name'])->name,
+                'type' => $audit->is_failure ? 'failed' : 'success',
                 'created_at' => $audit->created_at->format('d/m/Y H:i'),
                 'changes' => $audit->changes,
             ]),
@@ -478,7 +478,7 @@ Route::post('/audit/read', function (Request $request) {
         ->get()
         ->map(fn ($audit) => [
             'action' => $audit->event,
-            'user_id' => $audit->user_id,
+            'created_by' => User::find($audit->created_by, ['name'])->name,
             'created_at' => $audit->created_at->format('d/m/Y H:i'),
         ]);
 
@@ -626,7 +626,6 @@ public function getAuditOptions(): AuditOptions
 
 Ou globalmente, em `config/auditable.php`, no bloco `restore`.
 
-
 ## Auditando falhas (o debug que só o dev vê)
 
 Quando uma operação pode falhar e você quer registrar **por que** falhou, use
@@ -658,6 +657,38 @@ $falha->debug_info;   // trace, sql, request, ambiente — tudo o que você prec
 
 > O `debug_info` traz driver e nome do banco, mas **nunca host ou credenciais**.
 > Detalhes de servidor só aparecem fora de produção.
+
+## Usuário padrão para ações de sistema
+
+Por padrão, quando uma auditoria é registrada, o campo `created_by` guarda o ID do usuário que está logado no momento. Mas **o que acontece quando não tem ninguém logado?**
+
+Exemplos de situações sem usuário logado:
+
+- Comandos do Artisan rodando no terminal (`php artisan db:seed`)
+- Jobs na fila (Redis, SQS, etc.)
+- Agendamentos do Cron (`php artisan schedule:run`)
+- Webhooks recebendo requisições de sistemas externos
+
+Nestes casos, o `created_by` ficaria **vazio (NULL)**. Para resolver isso, o pacote permite definir um **usuário padrão** que será usado como fallback.
+
+### Como configurar
+
+**Passo 1** - No arquivo `.env`, defina o ID do usuário que será usado como padrão:
+
+```dotenv
+# .env
+AUDITABLE_DEFAULT_USER_ID=1
+
+**Passo 2** - Se preferir, defina diretamente no config/auditable.php:
+
+```php
+// // config/auditable.php
+'default_user_id' => env('AUDITABLE_DEFAULT_USER_ID', 1),
+
+Mas por padrão o pacote no config ja defini o null para o usuário padrão como fallback.
+
+// config/auditable.php
+'default_user_id' => env('AUDITABLE_DEFAULT_USER_ID', null), // ID NULL como fallback
 
 ## Multitenancy (opcional)
 
@@ -718,7 +749,7 @@ Cada peça do pacote é uma interface com implementação padrão. Para trocar,
 religue no seu `AppServiceProvider`:
 
 | Interface | O que faz | Padrão |
-|-----------|-----------|--------|
+| ----------- | ----------- | -------- |
 | `AuditRepository` | Persiste a auditoria | Grava via Eloquent |
 | `BatchIdGenerator` | Agrupa operações relacionadas | ULID |
 | `ContextResolver` | Descobre usuário e tenant atuais | `auth()` + seu resolver |
@@ -921,7 +952,7 @@ Now, instead of `status_id: 2 → 5`, the log records `Status: "Active" → "Blo
 ### The three translation modes
 
 | Mode | When to use | Example |
-|------|-------------|---------|
+| ------ | ------------- | --------- |
 | `direct` | The FK points straight to a table with the name | `status_id` → `statuses` table |
 | `join` | You need to walk through intermediate tables | `state_id` → `states` → `countries` |
 | `alias` | Not an FK, you just want to rename the field | `active` → "Status" |
@@ -1251,13 +1282,13 @@ use Illuminate\Http\Request;
 Route::post('/audit/readGrouped', function (Request $request) {
     $groups = Product::operationFor($request->input('id'))
         ->get()
-        ->groupBy('batch_id')
+        ->groupBy('batch')
         ->map(fn ($actions, $batchId) => [
             'batch_id' => $batchId,
             'actions' => $actions->map(fn ($audit) => [
                 'action' => $audit->event,
-                'type' => 'success',
-                'user_id' => $audit->user_id,
+                'created_by' => User::find($audit->created_by, ['name'])->name,
+                'type' => $audit->is_failure ? 'failed' : 'success',
                 'created_at' => $audit->created_at->format('Y-m-d H:i'),
                 'changes' => $audit->changes,
             ]),
@@ -1285,7 +1316,7 @@ Route::post('/audit/read', function (Request $request) {
         ->get()
         ->map(fn ($audit) => [
             'action' => $audit->event,
-            'user_id' => $audit->user_id,
+            'created_by' => User::find($audit->created_by, ['name'])->name,
             'created_at' => $audit->created_at->format('Y-m-d H:i'),
         ]);
 
@@ -1433,7 +1464,6 @@ public function getAuditOptions(): AuditOptions
 
 Or globally, in `config/auditable.php`, under the `restore` block.
 
-
 ## Auditing failures (the debug only the dev sees)
 
 When an operation can fail and you want to record **why**, use `auditFailure()`
@@ -1465,6 +1495,16 @@ $failure->debug_info;   // trace, sql, request, environment — everything you n
 
 > `debug_info` includes the driver and database name, but **never host or
 > credentials**. Server details only show outside production.
+
+## Default user for system actions
+
+When an audit is triggered by a console command, a queued job, a seeder, or any
+other context without an authenticated user, `created_by` would stay empty. For
+these cases, you can set a **default user** that will be used as a fallback:
+
+```php
+// config/auditable.php
+'default_user_id' => env('AUDITABLE_DEFAULT_USER_ID', null),
 
 ## Multitenancy (optional)
 
@@ -1525,7 +1565,7 @@ Every piece of the package is an interface with a default implementation. To
 swap one, rebind it in your `AppServiceProvider`:
 
 | Interface | What it does | Default |
-|-----------|--------------|---------|
+| ----------- | -------------- | --------- |
 | `AuditRepository` | Persists the audit entry | Writes via Eloquent |
 | `BatchIdGenerator` | Groups related operations | ULID |
 | `ContextResolver` | Finds current user and tenant | `auth()` + your resolver |

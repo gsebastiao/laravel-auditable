@@ -152,7 +152,7 @@ class Audit extends Model
     /** Auditorias de um usuário específico. */
     public function scopeByUser(Builder $query, int|string $userId): Builder
     {
-        return $query->where('user_id', $userId);
+        return $query->where('created_by', $userId);
     }
 
     /** Auditorias de um batch (uma operação lógica que tocou várias linhas). */

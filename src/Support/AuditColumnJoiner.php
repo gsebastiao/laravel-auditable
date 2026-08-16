@@ -156,7 +156,7 @@ final class AuditColumnJoiner
             $aggregate = ($event === 'created') ? 'MIN' : 'MAX';
 
             // Subconsulta: para cada subject_id, pega a linha-alvo daquele evento
-            // (via id agregado) e devolve user_id + a data já formatada. O JOIN
+            // (via id agregado) e devolve created_by + a data já formatada. O JOIN
             // interno reduz o histórico àquela única linha por registro, então o
             // LEFT JOIN externo com a tabela principal fica 1:1.
             //
@@ -168,7 +168,7 @@ final class AuditColumnJoiner
             $subquery = DB::raw("(
                 SELECT
                     a.subject_id,
-                    a.user_id,
+                    a.created_by,
                     DATE_FORMAT(a.created_at, '{$mysqlFormat}') AS action_at
                 FROM {$auditTable} a
                 INNER JOIN (
@@ -190,12 +190,12 @@ final class AuditColumnJoiner
             $bindTarget = $query instanceof Builder ? $query->getQuery() : $query;
             $bindTarget->addBinding([$morphClass, $event, $morphClass, $event], 'join');
 
-            // JOIN com users para traduzir user_id → nome/email exibível.
+            // JOIN com users para traduzir created_by → nome/email exibível.
             $query->leftJoin(
                 "{$usersTable} as {$userAias}",
                 "{$userAias}.id",
                 '=',
-                "{$alias}.user_id"
+                "{$alias}.created_by"
             );
 
             [$outputBy, $outputAt] = self::outputNames($event, $prefix);

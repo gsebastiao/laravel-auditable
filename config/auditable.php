@@ -31,7 +31,7 @@ return [
     | específica é uma das formas de isolar auditoria por tenant no modo
     | tenancy-por-database.
     */
-    'table' => 'audits',
+    'table' => 'audit_table',
     'connection' => env('AUDITABLE_CONNECTION'),
 
     /*
@@ -39,7 +39,7 @@ return [
     | Tabela de usuários
     |--------------------------------------------------------------------------
     | Usada apenas pelo AuditColumnJoiner (colunas "quem/quando" em grelhas),
-    | para traduzir user_id no nome/email exibível via JOIN. Não afeta a
+    | para traduzir created_by no nome/email exibível via JOIN. Não afeta a
     | gravação da auditoria — só a montagem de listagens.
     */
     'users_table' => 'users',
@@ -63,6 +63,18 @@ return [
     | De qual guard extrair o usuário responsável. null = guard default.
     */
     'auth_guard' => null,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Usuário padrão (fallback)
+    |--------------------------------------------------------------------------
+    | Quando não houver usuário autenticado (ex.: comandos de console, jobs,
+    | seeders, ou ações de sistema), a auditoria usará este ID como created_by.
+    | Útil para rastrear ações executadas pelo sistema, cron jobs, etc.
+    |
+    | Define como null para não preencher created_by nestes casos (coluna ficará NULL).
+    */
+    'default_user_id' => env('AUDITABLE_DEFAULT_USER_ID', null),
 
     /*
     |--------------------------------------------------------------------------

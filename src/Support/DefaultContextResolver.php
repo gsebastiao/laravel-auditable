@@ -24,13 +24,16 @@ final class DefaultContextResolver implements ContextResolver
      */
     public function __construct(
         private AuthFactory $auth,
-        private mixed $tenantResolver = null,
         private ?string $guard = null,
+        private mixed $tenantResolver = null,
+        private int|string|null $defaultUserId = null,
     ) {}
 
     public function userId(): int|string|null
     {
-        return $this->auth->guard($this->guard)->id();
+        $userId = $this->auth->guard($this->guard)->id();
+        // Se não houver usuário autenticado, usa o fallback configurado
+        return $userId ?? $this->defaultUserId;
     }
 
     public function tenantId(): int|string|null

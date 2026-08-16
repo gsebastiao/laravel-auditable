@@ -18,7 +18,7 @@ return new class extends Migration {
             $table->string('subject_type');
             $table->unsignedBigInteger('subject_id')->nullable();
 
-            $table->string('event', 50); // created, updated, deleted, restored
+            $table->string('event', 100); // created, updated, deleted, restored
 
             $table->json('changes')->nullable();
             $table->json('debug_info')->nullable();
