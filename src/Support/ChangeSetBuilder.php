@@ -5,36 +5,57 @@ declare(strict_types=1);
 namespace Gsebastiao\Auditable\Support;
 
 /**
- * Constrói o conjunto de mudanças (diff) entre estados de um model,
- * aplicando o ResolveMap para produzir labels legíveis.
+ * Monta o conteúdo da coluna `changes` a partir de arrays simples de
+ * atributos — não conhece Eloquent. Quem prepara os valores (crus, com JSON
+ * já decodificado e campos criptografados mascarados) é o AuditManager.
  *
- * Corresponde ao método resolveMap() de comparação do BaseModel original,
- * agora separado da resolução de label em si (LabelResolver) e operando
- * sobre valores já passados pelos casts do Eloquent — não mais sobre
- * stdClass cru vindo de DB::table(), que era uma das fragilidades apontadas.
+ * Formatos produzidos:
+ *
+ *   updated (diff):     ['preco' => ['old' => 20, 'new' => 25]]
+ *   com resolveMap:     ['Status' => ['old' => ['id' => 2, 'label' => 'Ativo'],
+ *                                     'new' => ['id' => 5, 'label' => 'Bloqueado']]]
+ *   created/deleted:    ['nome' => 'Café', 'Status' => ['id' => 2, 'label' => 'Ativo']]
  */
 final class ChangeSetBuilder
 {
+    /** Valor gravado no lugar de campos criptografados (casts "encrypted"). */
+    public const MASK = '********';
+
     public function __construct(private LabelResolver $labels) {}
 
     /**
-     * @param  array<string, mixed>  $new     Atributos novos (já com casts).
-     * @param  array<string, mixed>  $old     Atributos antigos (já com casts).
-     * @param  AuditOptions          $options
-     * @return array<string, mixed>          Diff indexado por label legível.
+     * Diff entre dois estados.
+     *
+     * @param  array<string, mixed>     $new          Atributos depois da escrita.
+     * @param  array<string, mixed>     $old          Atributos antes da escrita.
+     * @param  array<int, string>|null  $changedKeys  Campos que o Eloquent confirmou como
+     *                                                alterados. Null = descobrir comparando
+     *                                                $old com $new (caminho do Query Builder).
+     * @param  string|null              $connection   Conexão onde estão as tabelas do resolveMap.
+     * @return array<string, mixed>
      */
-    public function build(array $new, array $old, AuditOptions $options): array
-    {
+    public function build(
+        array $new,
+        array $old,
+        AuditOptions $options,
+        ?array $changedKeys = null,
+        ?string $connection = null,
+    ): array {
+        $fields = ($options->onlyDirty && $changedKeys !== null)
+            ? $changedKeys
+            : array_keys($new);
+
         $changes = [];
 
-        foreach ($new as $field => $newValue) {
+        foreach ($fields as $field) {
             if ($this->skip($field, $options)) {
                 continue;
             }
 
+            $newValue = $new[$field] ?? null;
             $oldValue = $old[$field] ?? null;
 
-            if ($options->onlyDirty && $this->equal($oldValue, $newValue)) {
+            if ($options->onlyDirty && $changedKeys === null && $this->equal($oldValue, $newValue)) {
                 continue;
             }
 
@@ -52,10 +73,9 @@ final class ChangeSetBuilder
                 continue;
             }
 
-            $label = $this->labels->labelFor($map);
-            $changes[$label] = [
-                'old' => ['id' => $oldValue, 'label' => $this->labels->resolve($oldValue, $map)],
-                'new' => ['id' => $newValue, 'label' => $this->labels->resolve($newValue, $map)],
+            $changes[$this->labels->labelFor($map)] = [
+                'old' => ['id' => $oldValue, 'label' => $this->labels->resolve($oldValue, $map, $connection)],
+                'new' => ['id' => $newValue, 'label' => $this->labels->resolve($newValue, $map, $connection)],
             ];
         }
 
@@ -63,13 +83,12 @@ final class ChangeSetBuilder
     }
 
     /**
-     * Snapshot para create/delete, onde não há "antes"/"depois" a comparar —
-     * apenas o estado do registro, com FKs resolvidas.
+     * Retrato legível para created/deleted/restored (não há "antes" e "depois").
      *
      * @param  array<string, mixed>  $attributes
      * @return array<string, mixed>
      */
-    public function snapshot(array $attributes, AuditOptions $options): array
+    public function snapshot(array $attributes, AuditOptions $options, ?string $connection = null): array
     {
         $snapshot = [];
 
@@ -81,71 +100,48 @@ final class ChangeSetBuilder
             $map = $options->resolveMap[$field] ?? null;
 
             if ($map === null || ($map['type'] ?? 'direct') === 'alias') {
-                $label = $map['label'] ?? $field;
-                $snapshot[$label] = $value;
+                $snapshot[$map['label'] ?? $field] = $value;
 
                 continue;
             }
 
-            $label = $this->labels->labelFor($map);
-            $snapshot[$label] = ['id' => $value, 'label' => $this->labels->resolve($value, $map)];
+            $snapshot[$this->labels->labelFor($map)] = [
+                'id' => $value,
+                'label' => $this->labels->resolve($value, $map, $connection),
+            ];
         }
 
         return $snapshot;
     }
 
     /**
-     * Retrato CRU e INTEGRAL do registro, para reconstrução programática após um
-     * hard delete. Diferente de snapshot():
+     * Retrato CRU e INTEGRAL para reconstruir a linha depois de um hard delete.
+     * Ignora only()/except() (a linha precisa voltar inteira) e não traduz
+     * nada; só remove os campos de neverSnapshot().
      *
-     *   • IGNORA only()/except() — o objetivo é restaurar a linha INTEIRA, não
-     *     produzir um log legível. Campos que você esconde do diff ainda são
-     *     necessários para recriar o registro fielmente.
-     *   • NÃO resolve labels — guarda os VALORES CRUS (as FKs como ids), que são
-     *     o que um insert de restauro precisa. Label é para humano ler; aqui é
-     *     para o código reidratar.
-     *   • Respeita apenas $options->neverSnapshot — segredos (senha, tokens) não
-     *     sobrevivem nem num retrato de restauro.
-     *
-     * O resultado é um mapa simples campo → valor cru, pronto para alimentar um
-     * Model::create()/insert() de recuperação.
-     *
-     * @param  array<string, mixed>  $attributes  Atributos crus do registro (getOriginal()).
-     * @param  AuditOptions          $options
+     * @param  array<string, mixed>  $attributes  Valores crus, como estão no banco (getRawOriginal()).
      * @return array<string, mixed>
      */
     public function fullSnapshot(array $attributes, AuditOptions $options): array
     {
-        $snapshot = [];
-
-        foreach ($attributes as $field => $value) {
-            if (in_array($field, $options->neverSnapshot, true)) {
-                continue;
-            }
-
-            $snapshot[$field] = $value;
-        }
-
-        return $snapshot;
+        return array_diff_key($attributes, array_flip($options->neverSnapshot));
     }
 
     private function skip(string $field, AuditOptions $options): bool
     {
-        if (in_array($field, $options->except, true)) {
+        if (in_array($field, $options->except, true) || in_array($field, $options->neverSnapshot, true)) {
             return true;
         }
 
-        if ($options->only !== null && ! in_array($field, $options->only, true)) {
-            return true;
-        }
-
-        return false;
+        return $options->only !== null && ! in_array($field, $options->only, true);
     }
 
+    /**
+     * Comparação frouxa ("1" == 1), mas null e string vazia são diferentes.
+     * Só é usada quando não há lista de campos alterados vinda do Eloquent.
+     */
     private function equal(mixed $a, mixed $b): bool
     {
-        // Comparação frouxa evita falsos positivos entre "1" (banco) e 1 (cast),
-        // mas distingue null de string vazia.
         if ($a === null xor $b === null) {
             return false;
         }

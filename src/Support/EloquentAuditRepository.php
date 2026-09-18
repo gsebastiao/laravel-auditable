@@ -7,19 +7,47 @@ namespace Gsebastiao\Auditable\Support;
 use Gsebastiao\Auditable\Contracts\AuditRepository;
 
 /**
- * Persistência padrão: grava via o modelo Eloquent configurado em
- * config('auditable.model'). Como esse modelo respeita config('auditable.connection'),
- * quem usa tenancy por-database ganha isolamento de auditoria sem tocar aqui.
+ * Gravação padrão: usa o model de config('auditable.model') — e portanto a
+ * tabela e a conexão configuradas.
  *
- * Quem precisar de fila, batching ou destino externo fornece a própria
- * implementação de AuditRepository e a religa no container.
+ * Os timestamps automáticos do Eloquent ficam desligados nestas gravações:
+ * created_at/updated_at já vêm prontos no $payload (inclusive quando o dev
+ * os força em audit(createdAt: ...)).
  */
 final class EloquentAuditRepository implements AuditRepository
 {
-    public function persist(array $payload): void
+    public function persist(array $payload): int|string|null
     {
         $model = config('auditable.model');
 
-        $model::query()->create($payload);
+        $audit = new $model();
+        $audit->timestamps = false;
+        $audit->forceFill($payload)->save();
+
+        return $audit->getKey();
+    }
+
+    public function replace(int|string $id, array $payload): void
+    {
+        $model = config('auditable.model');
+
+        // Sem scopes: o id veio desta mesma requisição, é a linha certa.
+        $existing = $model::query()->withoutGlobalScopes()->find($id);
+
+        if ($existing === null) {
+            $this->persist($payload);
+
+            return;
+        }
+
+        $existing->timestamps = false;
+        $existing->forceFill($payload)->save();
+    }
+
+    public function forget(int|string $id): void
+    {
+        $model = config('auditable.model');
+
+        $model::query()->withoutGlobalScopes()->find($id)?->delete();
     }
 }

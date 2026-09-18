@@ -24,10 +24,13 @@
  *     resumo rápido, sem sobrecarregar a tela.
  *
  * Cada um tem seu próprio contrato de resposta HTTP — veja o bloco
- * "CONTRATOS DE RESPOSTA" logo abaixo. Nenhuma rota do lado do servidor
- * vem pronta: você escreve o endpoint Laravel que devolve esse JSON
- * (normalmente chamando ->operation() ou ->auditsFor() do próprio
- * pacote). O README do pacote tem um exemplo completo de cada rota.
+ * "CONTRATOS DE RESPOSTA" logo abaixo. A rota é sua, mas o pacote já
+ * monta o JSON certo:
+ *
+ *   return AuditWidget::full(Produto::operationsFor($id), recordId: $id);
+ *   return AuditWidget::simple(Produto::auditsFor($id));
+ *
+ * (Gsebastiao\Auditable\Support\AuditWidget). O README tem as rotas completas.
  *
  * Todo o CSS injetado usa classes prefixadas com "ga-audit-" para nunca
  * colidir com o CSS de um template já existente na sua aplicação
@@ -53,7 +56,11 @@
  *             "type": "success",
  *             "created_by": "Maria Silva",
  *             "created_at": "2026-08-01 14:32:10",
- *             "changes": { "Status": ["Ativo", "Bloqueado"] }
+ *             "changes": {
+ *               "preco":  { "old": 20, "new": 25 },
+ *               "Status": { "old": { "id": 1, "label": "Ativo" },
+ *                           "new": { "id": 3, "label": "Bloqueado" } }
+ *             }
  *           }
  *         ]
  *       }
@@ -67,6 +74,10 @@
  *       { "action": "updated", "created_by": "Maria Silva", "created_at": "2026-08-01 14:32:10" }
  *     ]
  *   }
+ *
+ * "changes" é exatamente a coluna `changes` da auditoria: { "old", "new" }
+ * para alterações, ou { campo: valor } para created/deleted/ações livres.
+ * "type" = "failed" mostra a linha como falha (AuditWidget usa isFailure()).
  *
  * Em ambos os casos, o "id" passado em .open({ id }) chega no corpo do
  * POST como { id: ... } — é o valor que a sua rota vai usar para buscar
@@ -291,16 +302,6 @@
     /* ======================================================================
      * 3. HELPERS GERAIS
      * ==================================================================== */
-
-    function escapeHtml(value) {
-        if (value === null || value === undefined) return '';
-        return String(value)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-    }
 
     function formatFieldLabel(field) {
         if (!field) return '';
@@ -728,72 +729,73 @@
                 return map[t] || (type || 'Outro');
             }
 
+            // Texto legível para um valor gravado pelo pacote.
+            function displayValue(value) {
+                if (value === null || value === undefined || value === '') return '(vazio)';
+                if (typeof value === 'boolean') return value ? 'Sim' : 'Não';
+                if (Array.isArray(value)) {
+                    return value.length === 0 ? '(vazio)' : value.map(displayValue).join(', ');
+                }
+                if (typeof value === 'object') {
+                    // { id, label } vindo do resolveMap: mostra o nome (ou o id, se o nome sumiu).
+                    if (Object.prototype.hasOwnProperty.call(value, 'label')) {
+                        if (value.label !== null && value.label !== undefined && value.label !== '') return String(value.label);
+                        return (value.id === null || value.id === undefined) ? '(vazio)' : '#' + value.id;
+                    }
+                    return JSON.stringify(value);
+                }
+                return String(value);
+            }
+
+            // O pacote grava uma alteração como { "old": ..., "new": ... }.
+            function isDiff(value) {
+                return value !== null && typeof value === 'object' && !Array.isArray(value)
+                    && Object.prototype.hasOwnProperty.call(value, 'old')
+                    && Object.prototype.hasOwnProperty.call(value, 'new');
+            }
+
             function parseChanges(changesRaw) {
                 var lines = [];
                 var obj = changesRaw;
 
-                try {
-                    if (typeof changesRaw === 'string') obj = JSON.parse(changesRaw);
-                    if (!obj || typeof obj !== 'object') {
-                        lines.push(String(changesRaw));
-                        return lines;
+                if (typeof changesRaw === 'string') {
+                    try {
+                        obj = JSON.parse(changesRaw);
+                    } catch (e) {
+                        return [changesRaw];
+                    }
+                }
+
+                if (!obj || typeof obj !== 'object') {
+                    return [String(changesRaw)];
+                }
+
+                // Campos técnicos que não interessam a quem lê o histórico.
+                var hideFields = ['id', 'created_at', 'updated_at', 'deleted_at', 'remember_token'];
+
+                Object.keys(obj).forEach(function (field) {
+                    if (hideFields.indexOf(field) !== -1) return;
+
+                    var val = obj[field];
+                    var label = field === 'message' ? 'Mensagem' : formatFieldLabel(field);
+
+                    if (field === 'password') {
+                        lines.push(label + ': ********');
+                        return;
                     }
 
-                    // Campos que NUNCA mostramos
-                    var hideFields = ['id', 'created_at', 'updated_at', 'deleted_at', 'remember_token'];
-
-                    Object.keys(obj).forEach(function (field) {
-                        // Pula campos técnicos
-                        if (hideFields.indexOf(field) !== -1) return;
-
-                        var val = obj[field];
-                        var label = formatFieldLabel(field);
-
-                        // Caso 1: É uma senha?
-                        if (field === 'password') {
-                            lines.push(label + ': ********');
-                            return;
-                        }
-
-                        // Caso 2: É um diff [old, new]?
-                        if (Array.isArray(val) && val.length === 2) {
-                            var oldVal = val[0];
-                            var newVal = val[1];
-
-                            // Se tiver label (ResolveMap), extrai
-                            if (typeof oldVal === 'object' && oldVal !== null && oldVal.label) {
-                                oldVal = oldVal.label;
-                            }
-                            if (typeof newVal === 'object' && newVal !== null && newVal.label) {
-                                newVal = newVal.label;
-                            }
-
-                            // Se são números ou strings, mostra como diff
-                            if (typeof oldVal !== 'object' && typeof newVal !== 'object') {
-                                lines.push(label + ': ' + (oldVal ?? '') + ' → ' + (newVal ?? ''));
-                            } else {
-                                // Fallback: mostra como JSON
-                                lines.push(label + ': ' + JSON.stringify(val));
-                            }
-                            return;
-                        }
-
-                        // Caso 3: É um objeto com label (ResolveMap em snapshot)?
-                        if (typeof val === 'object' && val !== null && val.label) {
-                            lines.push(label + ': ' + val.label);
-                            return;
-                        }
-
-                        // Caso 4: É um valor simples (snapshot)
-                        lines.push(label + ': ' + (val ?? ''));
-                    });
-
-                    if (lines.length === 0) {
-                        lines.push('Registro criado (sem alterações visíveis)');
+                    // Alteração (evento updated): "Preço: 20 → 25"
+                    if (isDiff(val)) {
+                        lines.push(label + ': ' + displayValue(val.old) + ' → ' + displayValue(val['new']));
+                        return;
                     }
 
-                } catch (e) {
-                    lines.push(String(changesRaw));
+                    // Retrato (created/deleted) ou dados de uma ação livre: "Nome: Café"
+                    lines.push(label + ': ' + displayValue(val));
+                });
+
+                if (lines.length === 0) {
+                    lines.push('Sem alterações visíveis');
                 }
 
                 return lines;

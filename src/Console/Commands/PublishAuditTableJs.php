@@ -50,13 +50,12 @@ final class PublishAuditTableJs extends Command
         $destination = $destinationDir.'/audit-table.init.js';
 
         if ($files->exists($destination) && ! $this->option('force')) {
-            $this->components->warn("Já existe um arquivo em: {$destination}");
-            $this->components->info('Use --force para sobrescrever, ex.: php artisan auditable:publish-js --force');
+            $this->components->warn("O arquivo já existe e foi mantido: {$destination}");
+            $this->components->info('Para substituir pela versão do pacote: php artisan auditable:publish-js --force');
 
-            // INVALID (não FAILURE): nada deu errado, só optamos por não
-            // sobrescrever sem confirmação explícita. Scripts de deploy que
-            // checam o exit code não devem tratar isto como erro fatal.
-            return self::INVALID;
+            // Nada deu errado: devolvemos SUCCESS (código 0) para não quebrar
+            // scripts de deploy que param em qualquer código diferente de 0.
+            return self::SUCCESS;
         }
 
         $files->ensureDirectoryExists($destinationDir);

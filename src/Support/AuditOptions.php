@@ -5,64 +5,74 @@ declare(strict_types=1);
 namespace Gsebastiao\Auditable\Support;
 
 /**
- * Objeto de configuração por-model, retornado por getAuditOptions().
+ * Configuração de auditoria de UM model, devolvida por getAuditOptions().
  *
- * Substitui o estado estático herdado do BaseModel original
- * ($autoAudit, $auditTable, etc.), que era compartilhado de forma insegura
- * entre models e entre requisições concorrentes. Cada model descreve o
- * próprio comportamento numa instância isolada, no estilo do LogOptions
- * da Spatie — mas estendido com o resolveMap, que é o diferencial deste
- * pacote sobre o activitylog.
+ *   public function getAuditOptions(): AuditOptions
+ *   {
+ *       return AuditOptions::defaults()
+ *           ->except(['observacao_interna'])
+ *           ->resolveMap(['status_id' => ResolveMap::direct('Status', 'status', 'nome')]);
+ *   }
+ *
+ * Cada model tem a sua própria instância (nada é estático nem partilhado entre
+ * models ou requisições). Todos os métodos devolvem $this, então encadeiam.
  */
 final class AuditOptions
 {
-    /** @var array<int, string> Eventos Eloquent a auditar. */
+    /**
+     * Os eventos "de escrita" que o Eloquent dispara sozinho. events() só
+     * filtra ESTES; ações com nome livre (auditAction('aprovado'),
+     * Audit::for(..., event: 'importado')) são sempre gravadas.
+     */
+    public const STANDARD_EVENTS = ['created', 'updated', 'deleted', 'restored'];
+
+    /** @var array<int, string> Eventos automáticos a auditar ('restored' só existe com SoftDeletes). */
     public array $events = ['created', 'updated', 'deleted'];
 
     /** @var array<int, string>|null Se definido, audita apenas estes atributos. Null = todos. */
     public ?array $only = null;
 
-    /** @var array<int, string> Atributos nunca auditados (senhas, tokens, etc.). */
+    /**
+     * Atributos que NUNCA aparecem no log legível (`changes`).
+     * Atenção: except() não tira o campo do retrato de restauro — para isso
+     * use neverSnapshot().
+     *
+     * @var array<int, string>
+     */
     public array $except = ['password', 'remember_token'];
 
-    /** Se true, só registra atributos que de fato mudaram (dirty). */
+    /** Se true, no evento `updated` só entram os atributos que mudaram de verdade. */
     public bool $onlyDirty = true;
 
-    /** Se false, não grava auditoria quando não houve nenhuma mudança. */
+    /** Se false, não grava nada quando não sobrou nenhuma mudança para registar. */
     public bool $logEmpty = false;
 
     /**
-     * Grava, no evento `deleted`, um SNAPSHOT INTEGRAL do registro em
-     * debug_info['restore'] — todos os campos, inclusive os que only()/except()
-     * escondem do diff legível. É a rede de segurança para HARD DELETE: se
-     * alguém apagar a linha de verdade (sem SoftDeletes), a auditoria guarda o
-     * retrato completo para reconstruir o registro depois.
-     *
-     * Por que em debug_info e não em changes: `changes` é o log LEGÍVEL, para
-     * humanos ("Produto X foi apagado"); ele respeita only/except de propósito.
-     * `debug_info['restore']` é o retrato CRU, para reconstrução programática —
-     * separando "o que uma pessoa lê" de "o que o código usa para restaurar".
-     *
-     * Ligado por padrão: o custo é um snapshot só no delete, e o benefício é não
-     * perder o dado num hard delete. Desligue com fullSnapshotOnDelete(false) se
-     * o registro tiver campos volumosos que você não quer duplicar na auditoria.
+     * Se false (padrão), as colunas created_at/updated_at do PRÓPRIO model não
+     * aparecem no log legível — a linha de auditoria já tem a sua própria data,
+     * e "updated_at: 10:00 → 10:05" em toda alteração só polui o histórico.
+     */
+    public bool $logTimestamps = false;
+
+    /**
+     * Grava, no evento `deleted`, um retrato INTEGRAL e CRU do registro em
+     * debug_info['restore'] — é o que permite Audit::restore() reconstruir a
+     * linha depois de um hard delete. Ignora only()/except() (a linha precisa
+     * voltar inteira); só respeita neverSnapshot().
      */
     public bool $fullSnapshotOnDelete = true;
 
     /**
-     * Campos NUNCA incluídos no snapshot de restauro, mesmo sendo integral.
-     * Segredos não devem sobreviver num retrato de auditoria. Somados ao
-     * except() do model no momento do snapshot integral.
+     * Campos que NUNCA são guardados na auditoria: nem no log legível, nem no
+     * retrato de restauro. Use para segredos (senhas, tokens, chaves de API).
      *
      * @var array<int, string>
      */
     public array $neverSnapshot = ['password', 'remember_token'];
 
     /**
-     * Mapa de resolução de labels legíveis. A joia do pacote.
-     *
-     * Formato: ['campo' => ResolveMap::direct(...) | ::join(...) | ::alias(...)]
-     * Ver a classe ResolveMap.
+     * Tradução de chaves estrangeiras para nomes legíveis.
+     * Formato: ['campo' => ResolveMap::direct(...) | ::join(...) | ::alias(...)].
      *
      * @var array<string, array<string, mixed>>
      */
@@ -76,7 +86,7 @@ final class AuditOptions
     /** @param array<int, string> $events */
     public function events(array $events): self
     {
-        $this->events = $events;
+        $this->events = array_values($events);
 
         return $this;
     }
@@ -84,12 +94,16 @@ final class AuditOptions
     /** @param array<int, string> $attributes */
     public function only(array $attributes): self
     {
-        $this->only = $attributes;
+        $this->only = array_values($attributes);
 
         return $this;
     }
 
-    /** @param array<int, string> $attributes */
+    /**
+     * Soma à lista padrão (password e remember_token continuam ignorados).
+     *
+     * @param array<int, string> $attributes
+     */
     public function except(array $attributes): self
     {
         $this->except = array_values(array_unique([...$this->except, ...$attributes]));
@@ -111,6 +125,13 @@ final class AuditOptions
         return $this;
     }
 
+    public function logTimestamps(bool $value = true): self
+    {
+        $this->logTimestamps = $value;
+
+        return $this;
+    }
+
     /** @param array<string, array<string, mixed>> $map */
     public function resolveMap(array $map): self
     {
@@ -119,9 +140,6 @@ final class AuditOptions
         return $this;
     }
 
-    /**
-     * Liga/desliga o snapshot integral de restauro no delete (ver a propriedade).
-     */
     public function fullSnapshotOnDelete(bool $value = true): self
     {
         $this->fullSnapshotOnDelete = $value;
@@ -130,8 +148,7 @@ final class AuditOptions
     }
 
     /**
-     * Adiciona campos à lista que nunca entra no snapshot de restauro (além dos
-     * segredos padrão). Use para dados sensíveis específicos do seu domínio.
+     * Soma campos à lista que nunca é guardada (nem no log, nem no retrato).
      *
      * @param array<int, string> $fields
      */
@@ -140,5 +157,18 @@ final class AuditOptions
         $this->neverSnapshot = array_values(array_unique([...$this->neverSnapshot, ...$fields]));
 
         return $this;
+    }
+
+    /**
+     * Um evento é filtrado por events()? Só os eventos automáticos são; nomes
+     * livres passam sempre.
+     */
+    public function allowsEvent(string $event): bool
+    {
+        if (! in_array($event, self::STANDARD_EVENTS, true)) {
+            return true;
+        }
+
+        return in_array($event, $this->events, true);
     }
 }

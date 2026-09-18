@@ -1,0 +1,29 @@
+fix!: corrige diff de casts, vazamento de segredos, tenant e restore; reescreve README
+
+Revisão completa do pacote expôs bugs graves confirmados por execução real
+contra Laravel 11/12/13. Corrigidos nesta versão:
+
+- Diff misturava getAttributes() (cru) com getOriginal() (castado): campos
+  array/enum/date/encrypted apareciam sempre como alterados, e um campo
+  encrypted podia ser gravado em texto claro na auditoria.
+- restore() perdia timezone e falhava com morphMap.
+- audit() usava spl_object_id() e podia substituir a linha de auditoria de
+  OUTRO registro (o PHP reaproveita esses ids). Agora usa WeakMap.
+- auditFailure() gravava SQL, bindings e host do banco em `changes`.
+- withoutTenantScope() não removia o scope (era uma classe anônima).
+- tenant.column era ignorado: a auditoria gravava sempre em tenant_id.
+- Audit::transaction() abria a transação na conexão errada quando
+  auditable.connection apontava para outro banco.
+- failures() devolvia também os deletes (que têm debug_info).
+- AuditColumnJoiner perdia colunas do model e sujava os models (isDirty()).
+- Resolver de tenant como closure na config impedia config:cache.
+- Subclasse de Models\Audit com $table próprio era ignorada; causer()
+  sempre devolvia null.
+
+BREAKING CHANGE: lockForUpdate removido de audit()/macro; changes de falha
+não tem mais a chave `error`; restore() tem nova assinatura; causer() foi
+substituído por user() (mantido como alias); Laravel mínimo agora é 11.4;
+widget JS espera changes no formato {old, new}. Ver CHANGELOG.md.
+
+Suíte: 37 -> 93 testes, verde em Laravel 11.4, 11.x, 12.x e 13.x.
+README reescrito do zero para iniciantes.

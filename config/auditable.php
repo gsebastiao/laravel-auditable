@@ -4,128 +4,107 @@ declare(strict_types=1);
 
 use Gsebastiao\Auditable\Models\Audit;
 
+/*
+|--------------------------------------------------------------------------
+| Configuração do laravel-auditable
+|--------------------------------------------------------------------------
+| Tudo aqui tem um valor padrão que funciona. Só mude o que precisar.
+| Depois de mudar, se usa `php artisan config:cache`, rode-o de novo.
+*/
+
 return [
 
     /*
-    |--------------------------------------------------------------------------
-    | Ativar auditoria
-    |--------------------------------------------------------------------------
-    | Interruptor global. Útil para desligar em testes ou seeders.
+    | Liga/desliga a auditoria no sistema inteiro.
+    | Útil em testes: AUDITABLE_ENABLED=false no .env.testing.
+    | Para desligar só um trecho de código: Audit::withoutAuditing(fn () => ...).
     */
     'enabled' => env('AUDITABLE_ENABLED', true),
 
     /*
-    |--------------------------------------------------------------------------
-    | Modelo de auditoria
-    |--------------------------------------------------------------------------
-    | Substituível: estenda Gsebastiao\Auditable\Models\Audit e aponte aqui
-    | para customizar tabela, conexão ou relações.
+    | Tabela onde as auditorias são gravadas.
+    | Se mudar, faça-o ANTES de rodar a migration.
+    */
+    'table' => 'audit_table',
+
+    /*
+    | Conexão de banco da auditoria. null = a conexão padrão da aplicação
+    | (recomendado). Se apontar para outro banco:
+    |   - Audit::transaction() desfaz os dois bancos juntos em caso de erro;
+    |   - AuditColumnJoiner deixa de funcionar (precisa do mesmo banco).
+    */
+    'connection' => env('AUDITABLE_CONNECTION'),
+
+    /*
+    | Model usado para ler e gravar a tabela de auditoria. Troque só se
+    | estender Gsebastiao\Auditable\Models\Audit para acrescentar algo.
     */
     'model' => Audit::class,
 
     /*
     |--------------------------------------------------------------------------
-    | Tabela e conexão
+    | Usuários
     |--------------------------------------------------------------------------
-    | 'connection' = null usa a conexão default do app. Definir uma conexão
-    | específica é uma das formas de isolar auditoria por tenant no modo
-    | tenancy-por-database.
+    | auth_guard:         de que guard vem o usuário logado (null = o padrão).
+    | default_created_by: id gravado quando NÃO há ninguém logado (comandos,
+    |                     filas, cron, webhooks). null = fica vazio ("Sistema").
+    | user_model:         model dos usuários, para $audit->user.
+    |                     null = config('auth.providers.users.model').
+    | users_table:        tabela dos usuários, usada pelo AuditColumnJoiner.
     */
-    'table' => 'audit_table',
-    'connection' => env('AUDITABLE_CONNECTION'),
+    'auth_guard' => null,
 
-    /*
-    |--------------------------------------------------------------------------
-    | Tabela de usuários
-    |--------------------------------------------------------------------------
-    | Usada apenas pelo AuditColumnJoiner (colunas "quem/quando" em grelhas),
-    | para traduzir created_by no nome/email exibível via JOIN. Não afeta a
-    | gravação da auditoria — só a montagem de listagens.
-    */
+    'default_created_by' => env('AUDITABLE_DEFAULT_CREATED_BY', env('AUDITABLE_DEFAULT_created_by')),
+
+    'user_model' => null,
+
     'users_table' => 'users',
 
     /*
-    |--------------------------------------------------------------------------
-    | Prefixo das colunas de auditoria em grelhas
-    |--------------------------------------------------------------------------
-    | Usado apenas pelo AuditColumnJoiner. Prefixa TODAS as colunas emitidas
-    | (audit_created_by, audit_created_at, audit_updated_by, …). O prefixo mantém
-    | o par _by/_at consistente e evita colisão com as colunas nativas do Eloquent
-    | created_at/updated_at/deleted_at (que têm cast automático de datetime).
-    | String vazia remove o prefixo, mas reintroduz esse risco de colisão.
+    | Prefixo das colunas criadas pelo AuditColumnJoiner nas listagens
+    | (audit_created_by, audit_created_at, ...). Evita choque com as colunas
+    | created_at/updated_at da sua própria tabela.
     */
     'column_prefix' => 'audit_',
 
     /*
     |--------------------------------------------------------------------------
-    | Guard de autenticação
+    | Multitenancy por coluna (opcional)
     |--------------------------------------------------------------------------
-    | De qual guard extrair o usuário responsável. null = guard default.
-    */
-    'auth_guard' => null,
-
-    /*
-    |--------------------------------------------------------------------------
-    | Usuário padrão (fallback)
-    |--------------------------------------------------------------------------
-    | Quando não houver usuário autenticado (ex.: comandos de console, jobs,
-    | seeders, ou ações de sistema), a auditoria usará este ID como created_by.
-    | Útil para rastrear ações executadas pelo sistema, cron jobs, etc.
+    | Use SÓ se todos os clientes (tenants) partilham o mesmo banco e cada
+    | linha tem uma coluna tenant_id. Se cada tenant tem o seu próprio banco
+    | (stancl/tenancy, spatie/laravel-multitenancy), deixe desligado.
     |
-    | Define como null para não preencher created_by nestes casos (coluna ficará NULL).
-    */
-    'default_created_by' => env('AUDITABLE_DEFAULT_created_by', null),
-
-    /*
-    |--------------------------------------------------------------------------
-    | Multitenancy (POR COLUNA)
-    |--------------------------------------------------------------------------
-    | Use isto APENAS no modo single-database com uma coluna tenant_id.
-    | Se você usa tenancy-por-database (stancl/tenancy, spatie/multitenancy
-    | multi-db), deixe 'enabled' => false: o isolamento já vem da conexão.
-    |
-    | 'resolver' é como o pacote descobre o tenant atual. O pacote LÊ, nunca
-    | ESTABELECE. Plugue aqui o que fizer sentido no seu app:
-    |
-    |   Auth:            fn () => auth()->user()?->tenant_id
-    |   stancl/tenancy:  fn () => tenant()?->getTenantKey()
-    |   spatie:          fn () => \Spatie\Multitenancy\Models\Tenant::current()?->id
+    | enabled:  grava e filtra a coluna de tenant na auditoria. Ligue ANTES de
+    |           rodar a migration (a coluna só é criada se estiver ligado).
+    | column:   nome da coluna de tenant.
+    | resolver: como descobrir o tenant atual — o nome de uma classe com
+    |           __invoke(), por exemplo App\Support\TenantAtual::class.
+    |           Alternativa: Audit::resolveTenantUsing(fn () => ...) no
+    |           AppServiceProvider. (Não coloque uma função anónima aqui:
+    |           isso impede o `php artisan config:cache`.)
+    | strict:   false = sem tenant identificado, as consultas veem todos os
+    |           tenants (ex.: painel central). true = não veem nada.
     */
     'tenant' => [
         'enabled' => env('AUDITABLE_TENANT_ENABLED', false),
         'column' => 'tenant_id',
         'resolver' => null,
+        'strict' => false,
     ],
 
     /*
-    |--------------------------------------------------------------------------
-    | Widget JS (OPCIONAL)
-    |--------------------------------------------------------------------------
-    | Nada aqui é obrigatório. O pacote grava e consulta auditoria sem
-    | precisar de nenhum arquivo JS — esta seção só existe para quem quiser
-    | usar o modal de histórico pronto (veja o README, seção "Widget JS
-    | opcional").
-    |
-    | 'publish_path' é onde `php artisan auditable:publish-js` copia o
-    | arquivo dentro de public/. Relativo a public/, sem barra inicial ou
-    | final. Ex.: com o padrão abaixo, o arquivo cai em
-    | public/assets/js/audit-table.init.js.
+    | Widget JS opcional (modal de histórico). Pasta, dentro de public/, para
+    | onde `php artisan auditable:publish-js` copia o arquivo.
     */
     'js' => [
         'publish_path' => 'assets/js',
     ],
 
     /*
-    |--------------------------------------------------------------------------
-    | Debug de falhas
-    |--------------------------------------------------------------------------
-    | Controla o conteúdo do campo debug_info gravado por $model->auditFailure().
-    | Esse campo é para o DESENVOLVEDOR — traz stack trace, SQL, request e
-    | ambiente do erro. A mensagem amigável fica em 'changes' (essa sim o
-    | usuário pode ver).
-    |
-    | 'include_database' adiciona driver e nome do banco ao debug. Host e
-    | credenciais nunca são incluídos.
+    | Falhas registradas com $model->auditFailure(...).
+    | include_database: grava o nome da conexão, o driver e o nome do banco no
+    | debug_info. Host, porta, usuário e senha NUNCA são gravados.
     */
     'debug' => [
         'include_database' => env('AUDITABLE_DEBUG_DB', true),

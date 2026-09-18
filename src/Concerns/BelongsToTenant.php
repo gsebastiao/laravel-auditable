@@ -4,72 +4,64 @@ declare(strict_types=1);
 
 namespace Gsebastiao\Auditable\Concerns;
 
+use Gsebastiao\Auditable\Contracts\ContextResolver;
+use Gsebastiao\Auditable\Support\TenantScope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Scope;
-use Gsebastiao\Auditable\Contracts\ContextResolver;
 
 /**
- * Trait OPCIONAL para o caso de tenancy por coluna discriminadora
- * (single-database, uma coluna tenant_id por linha).
+ * OPCIONAL — só para multitenancy "um banco, uma coluna tenant_id".
  *
- * NÃO use isto se você já usa tenancy por-database (stancl/tenancy,
- * spatie/multitenancy no modo multi-database): nesse cenário o isolamento é
- * feito pela troca de conexão e esta coluna seria redundante.
+ * Coloque nos SEUS models que pertencem a um tenant:
+ *
+ *   class Produto extends Model
+ *   {
+ *       use Auditable, BelongsToTenant;
+ *   }
  *
  * O que faz:
- *   1. Aplica um Global Scope que filtra WHERE tenant_id = <atual> em toda
- *      query — portanto SÓ funciona porque a auditoria é Eloquent-nativa; era
- *      justamente o que o DB::table() do BaseModel original impedia.
- *   2. Preenche tenant_id automaticamente no creating.
+ *   1. Toda consulta ganha "WHERE produtos.tenant_id = <tenant atual>".
+ *   2. Ao criar, preenche tenant_id sozinho (se você não tiver preenchido).
  *
- * Quem é o tenant atual vem do ContextResolver — o pacote lê, nunca estabelece.
+ * Quem é o tenant atual vem de config('auditable.tenant.resolver') ou de
+ * Audit::resolveTenantUsing(...). O pacote só LÊ esse valor, nunca o define.
+ *
+ * Não use se cada tenant tem o seu próprio banco (stancl/tenancy,
+ * spatie/laravel-multitenancy multi-banco): aí o isolamento já vem da conexão.
  */
 trait BelongsToTenant
 {
     public static function bootBelongsToTenant(): void
     {
-        static::addGlobalScope(new class implements Scope {
-            public function apply(Builder $builder, Model $model): void
-            {
-                $tenantId = app(ContextResolver::class)->tenantId();
-
-                if ($tenantId !== null) {
-                    $builder->where(
-                        $model->getTable().'.'.$model->tenantColumn(),
-                        $tenantId,
-                    );
-                }
-            }
-        });
+        static::addGlobalScope(new TenantScope());
 
         static::creating(function (Model $model): void {
             $column = $model->tenantColumn();
 
-            if ($model->getAttribute($column) === null) {
-                $tenantId = app(ContextResolver::class)->tenantId();
+            if ($model->getAttribute($column) !== null) {
+                return;
+            }
 
-                if ($tenantId !== null) {
-                    $model->setAttribute($column, $tenantId);
-                }
+            $tenantId = app(ContextResolver::class)->tenantId();
+
+            if ($tenantId !== null) {
+                $model->setAttribute($column, $tenantId);
             }
         });
     }
 
-    /**
-     * Nome da coluna de tenant. Override no model se necessário.
-     */
+    /** Nome da coluna de tenant. Sobrescreva no model se for diferente. */
     public function tenantColumn(): string
     {
-        return config('auditable.tenant.column', 'tenant_id');
+        return (string) config('auditable.tenant.column', 'tenant_id');
     }
 
     /**
-     * Escape hatch: query sem o filtro de tenant (para jobs centrais,
-     * relatórios cross-tenant, etc.). Uso deliberado e explícito.
+     * Consulta SEM o filtro de tenant (relatórios centrais, jobs de manutenção).
+     * Uso deliberado: você está a pedir dados de todos os tenants.
      */
     public static function withoutTenantScope(): Builder
     {
-        return static::withoutGlobalScope('Gsebastiao\Auditable\Concerns\BelongsToTenant');
+        return static::withoutGlobalScope(TenantScope::class);
     }
 }

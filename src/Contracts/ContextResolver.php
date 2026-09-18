@@ -5,26 +5,23 @@ declare(strict_types=1);
 namespace Gsebastiao\Auditable\Contracts;
 
 /**
- * Resolve o contexto da requisição/processo atual para carimbar na auditoria.
+ * Responde a duas perguntas no momento em que uma auditoria é gravada:
+ * "quem fez?" e "em que tenant?".
  *
- * REGRA DE OURO DO PACOTE: lemos o tenant e o usuário atuais, nunca os
- * estabelecemos. Estabelecer é trabalho da camada de infraestrutura de
- * tenancy (stancl/tenancy, spatie/laravel-multitenancy) ou do próprio app.
+ * Regra do pacote: lemos o usuário e o tenant atuais, nunca os definimos.
+ * Quem define é a sua aplicação (login) e o seu pacote de tenancy.
  *
- * A implementação padrão lê de auth() e de um callback configurável em
- * config('auditable.tenant.resolver'). Um consumidor que use stancl/tenancy
- * pode fornecer uma implementação que leia tenant()->id.
+ * A implementação padrão (DefaultContextResolver) lê o auth() do Laravel e o
+ * resolver de tenant que você configurar. Para trocar, religue no seu
+ * AppServiceProvider:
+ *
+ *   $this->app->bind(ContextResolver::class, MeuContexto::class);
  */
 interface ContextResolver
 {
-    /**
-     * ID do usuário responsável pela ação, ou null se for uma ação de sistema.
-     */
+    /** Id do usuário responsável, ou null para ação de sistema. */
     public function userId(): int|string|null;
 
-    /**
-     * ID do tenant atual, ou null se tenancy estiver desativado ou fora de
-     * contexto de tenant (ex.: comando de console no contexto central).
-     */
+    /** Id do tenant atual, ou null se não houver tenant (ou tenancy desligado). */
     public function tenantId(): int|string|null;
 }

@@ -4,17 +4,34 @@ declare(strict_types=1);
 
 namespace Gsebastiao\Auditable\Models;
 
+use Gsebastiao\Auditable\Support\ChangeSetBuilder;
+use Gsebastiao\Auditable\Support\TenantScope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Database\Eloquent\SoftDeletes;
+use RuntimeException;
 
 /**
- * Modelo de auditoria. Substituível pelo consumidor via
- * config('auditable.model'), no mesmo padrão do Activity da Spatie.
+ * Uma linha da tabela de auditoria.
  *
- * Tabela e conexão vêm da config. Definir uma conexão dedicada aqui é,
- * inclusive, uma das formas de isolar auditoria por tenant quando se usa
- * tenancy por-database: basta apontar para a conexão do tenant.
+ * Colunas: batch, subject_type, subject_id, event, changes, debug_info,
+ * created_by, created_at, updated_at (e tenant_id, se ligado).
+ *
+ * Para estender (relações extra, outra tabela, outra conexão):
+ *
+ *   class MinhaAuditoria extends \Gsebastiao\Auditable\Models\Audit
+ *   {
+ *       protected $table = 'historico';   // opcional: senão usa config('auditable.table')
+ *   }
+ *
+ * e aponte config('auditable.model') para ela.
+ *
+ * Atenção, dentro de uma subclasse: leia a coluna com
+ * $this->getAttribute('changes'). $this->changes é uma propriedade interna
+ * do Eloquent com o mesmo nome. (Fora da classe, $audit->changes funciona.)
  */
 class Audit extends Model
 {
@@ -25,41 +42,144 @@ class Audit extends Model
         'debug_info' => 'array',
     ];
 
-    public function __construct(array $attributes = [])
+    protected static function booted(): void
     {
-        $this->table = config('auditable.table', 'audits');
-        $this->setConnection(config('auditable.connection'));
-
-        parent::__construct($attributes);
+        if (config('auditable.tenant.enabled', false)) {
+            static::addGlobalScope(new TenantScope());
+        }
     }
 
-    /**
-     * O registro auditado (polimórfico). Permite $audit->subject de volta ao
-     * model original, e $model->audits() no sentido inverso via o trait.
-     */
+    /** $table definido numa subclasse tem prioridade; senão, a config. */
+    public function getTable(): string
+    {
+        return $this->table ?? (string) config('auditable.table', 'audit_table');
+    }
+
+    /** $connection definido numa subclasse tem prioridade; senão, a config. */
+    public function getConnectionName(): ?string
+    {
+        return $this->connection ?? config('auditable.connection');
+    }
+
+    public function tenantColumn(): string
+    {
+        return (string) config('auditable.tenant.column', 'tenant_id');
+    }
+
+    /** Consulta sem o filtro de tenant (relatórios centrais). */
+    public static function withoutTenantScope(): Builder
+    {
+        return static::query()->withoutGlobalScope(TenantScope::class);
+    }
+
+    // ------------------------------------------------------------------
+    // Relações
+    // ------------------------------------------------------------------
+
+    /** O registro auditado: $audit->subject. */
     public function subject(): MorphTo
     {
         return $this->morphTo();
     }
 
-    /**
-     * O usuário responsável. Resolvido de forma tardia para não acoplar o
-     * pacote a uma classe de usuário específica.
-     */
-    public function causer(): MorphTo
+    /** Quem fez: $audit->user?->name. Null em ações de sistema. */
+    public function user(): BelongsTo
     {
-        return $this->morphTo();
+        return $this->belongsTo(static::userModel(), 'created_by');
     }
 
-    // ---- Restauro de registros apagados (hard delete) ----
+    /** @deprecated use user() */
+    public function causer(): BelongsTo
+    {
+        return $this->user();
+    }
+
+    /** @return class-string<Model> */
+    public static function userModel(): string
+    {
+        return config('auditable.user_model')
+            ?? config('auth.providers.users.model')
+            ?? 'App\\Models\\User';
+    }
+
+    // ------------------------------------------------------------------
+    // Leitura
+    // ------------------------------------------------------------------
 
     /**
-     * Esta entrada de auditoria carrega um retrato de restauro?
+     * As alterações já em texto, prontas para mostrar numa tela:
      *
-     * Só entradas de `deleted` gravadas com fullSnapshotOnDelete ligado trazem,
-     * em debug_info['restore'], o retrato integral do registro. É o que permite
-     * reconstruir uma linha que foi apagada de VERDADE (sem SoftDeletes).
+     *   ['Preco: 20 → 25', 'Status: Ativo → Bloqueado']
+     *
+     * Campos técnicos (id, created_at, updated_at, deleted_at,
+     * remember_token) ficam de fora — a mesma regra do widget JS.
+     *
+     * @return array<int, string>
      */
+    public function changeLines(): array
+    {
+        $hidden = ['id', 'created_at', 'updated_at', 'deleted_at', 'remember_token'];
+        $lines = [];
+
+        // $this->changes (sem getAttribute) seria a propriedade interna do
+        // Eloquent com o mesmo nome, e não a coluna.
+        foreach ((array) $this->getAttribute('changes') as $field => $value) {
+            $field = (string) $field;
+
+            if (in_array($field, $hidden, true)) {
+                continue;
+            }
+
+            $label = $field === 'message' ? 'Mensagem' : static::fieldLabel($field);
+
+            if ($field === 'password') {
+                $lines[] = $label.': '.ChangeSetBuilder::MASK;
+            } elseif (is_array($value) && array_key_exists('old', $value) && array_key_exists('new', $value)) {
+                $lines[] = $label.': '.static::displayValue($value['old']).' → '.static::displayValue($value['new']);
+            } else {
+                $lines[] = $label.': '.static::displayValue($value);
+            }
+        }
+
+        return $lines;
+    }
+
+    /** "status_id" → "Status Id" (o nome legível vem do resolveMap, se houver). */
+    protected static function fieldLabel(string $field): string
+    {
+        $words = array_map(
+            static fn (string $word) => mb_strtoupper(mb_substr($word, 0, 1)).mb_substr($word, 1),
+            explode(' ', str_replace('_', ' ', $field)),
+        );
+
+        return implode(' ', $words);
+    }
+
+    protected static function displayValue(mixed $value): string
+    {
+        return match (true) {
+            $value === null, $value === '', $value === [] => '(vazio)',
+            is_bool($value) => $value ? 'Sim' : 'Não',
+            is_array($value) && array_key_exists('label', $value) => (string) ($value['label'] ?? '') !== ''
+                ? (string) $value['label']
+                : (isset($value['id']) ? '#'.$value['id'] : '(vazio)'),
+            is_array($value) && array_is_list($value) => implode(', ', array_map(static fn ($item) => static::displayValue($item), $value)),
+            is_array($value) => (string) json_encode($value, JSON_UNESCAPED_UNICODE),
+            default => (string) $value,
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Falhas e restauro
+    // ------------------------------------------------------------------
+
+    /** Esta linha foi gravada por auditFailure()? */
+    public function isFailure(): bool
+    {
+        return is_array($this->debug_info) && isset($this->debug_info['error']);
+    }
+
+    /** Esta linha guarda um retrato capaz de recriar o registro apagado? */
     public function isRestorable(): bool
     {
         $debug = $this->debug_info;
@@ -70,55 +190,67 @@ class Audit extends Model
     }
 
     /**
-     * Reconstrói o registro apagado a partir do retrato de restauro.
+     * Recria na tabela original o registro apagado (hard delete).
      *
-     * Cenário: alguém deu um HARD DELETE num Produto. A linha sumiu da tabela,
-     * mas a auditoria guardou o retrato integral. Você recupera assim:
+     *   $audit = Produto::auditsFor($id)->action('deleted')->first();
+     *   $produto = $audit->restore();
      *
-     *   $audit = Produto::auditsFor($id)->action('deleted')->latest()->first();
-     *   $produto = $audit->restore();   // a linha volta à tabela original
+     * Os valores voltam exatamente como estavam no banco (datas, JSON, campos
+     * criptografados). Campos de neverSnapshot() (ex.: password) não foram
+     * guardados: passe-os em $attributes se a coluna for obrigatória.
      *
-     * O retrato é CRU (valores e FKs como eram), então o registro volta idêntico,
-     * incluindo o id original. Campos sensíveis (senha, tokens) não foram
-     * gravados no retrato — então NÃO voltam; trate-os no seu fluxo se preciso.
+     * @param  bool                  $withId      Recriar com o mesmo id (padrão) ou deixar o banco gerar outro.
+     * @param  array<string, mixed>  $attributes  Valores extra/novos (passam pelos casts e mutators do model).
      *
-     * @param  bool  $withId  Recriar com o MESMO id original (padrão). Passe false
-     *         para deixar o banco atribuir um id novo (evita conflito se algo já
-     *         tiver reocupado aquele id).
-     * @return Model  O registro recriado.
-     *
-     * @throws \RuntimeException  Se esta entrada não tiver retrato de restauro.
+     * @throws RuntimeException  Sem retrato, model desconhecido, ou id já ocupado.
      */
-    public function restore(bool $withId = true): Model
+    public function restore(bool $withId = true, array $attributes = []): Model
     {
         if (! $this->isRestorable()) {
-            throw new \RuntimeException(
-                'Esta auditoria não contém um retrato de restauro. '
-                . 'Só eventos "deleted" gravados com fullSnapshotOnDelete ativo podem ser restaurados.'
+            throw new RuntimeException(
+                'Esta auditoria não tem retrato de restauro. Só eventos "deleted" gravados '
+                .'com fullSnapshotOnDelete ligado (o padrão) podem ser restaurados.'
             );
         }
 
-        $restore    = $this->debug_info['restore'];
-        $modelClass = $restore['subject_type'];
-        $attributes = $restore['attributes'];
+        $restore = $this->debug_info['restore'];
+        $type = (string) $restore['subject_type'];
+        $class = Relation::getMorphedModel($type) ?? $type;
 
-        /** @var Model $model */
-        $model = new $modelClass();
-        $keyName = $restore['key_name'] ?? $model->getKeyName();
-
-        if (! $withId) {
-            unset($attributes[$keyName]);
+        if (! class_exists($class) || ! is_subclass_of($class, Model::class)) {
+            throw new RuntimeException(
+                "Não encontrei o model \"{$type}\" para restaurar. Se usa morphMap, confirme que o alias continua registrado."
+            );
         }
 
-        // Preenche sem disparar guarded/fillable: é uma reconstrução fiel, não
-        // uma criação de usuário. forceFill + save mantém o registro idêntico.
-        $model->forceFill($attributes);
+        /** @var Model $model */
+        $model = new $class();
 
-        // Se vamos manter o id original, o insert precisa ser explícito para o
-        // Eloquent não tratar como update de um model existente.
-        if ($withId) {
-            $model->exists = false;
-            $model->wasRecentlyCreated = true;
+        if (! empty($restore['table'])) {
+            $model->setTable($restore['table']);
+        }
+
+        $keyName = $restore['key_name'] ?? $model->getKeyName();
+        $raw = $restore['attributes'];
+
+        if (! $withId) {
+            unset($raw[$keyName]);
+        } elseif (isset($raw[$keyName]) && $class::query()->withoutGlobalScopes()->whereKey($raw[$keyName])->exists()) {
+            $hint = in_array(SoftDeletes::class, class_uses_recursive($class), true)
+                ? ' Se ele está na lixeira (SoftDeletes), use $model->restore() do próprio model.'
+                : '';
+
+            throw new RuntimeException(
+                "Já existe um {$class} com {$keyName} = {$raw[$keyName]}. "
+                .'Use restore(withId: false) para recriar com um id novo.'.$hint
+            );
+        }
+
+        // Valores crus: nada de casts/mutators, para voltar idêntico ao que era.
+        $model->setRawAttributes($raw);
+
+        if ($attributes !== []) {
+            $model->forceFill($attributes);
         }
 
         $model->save();
@@ -126,74 +258,81 @@ class Audit extends Model
         return $model;
     }
 
-    // ---- Scopes de consulta ----
-    // Encadeáveis: Audit::forRecord(Produto::class, 42)->action('aprovado')->get()
+    // ------------------------------------------------------------------
+    // Filtros encadeáveis:  Audit::forRecord(Produto::class, 42)->action('aprovado')->get()
+    // ------------------------------------------------------------------
 
-    /** Auditorias de um registro específico, por classe e id — sem carregar o model. */
+    /** Auditorias de um registro (classe do model ou nome livre usado no Audit::for). */
     public function scopeForRecord(Builder $query, string $subjectType, int|string $subjectId): Builder
     {
         return $query
-            ->where('subject_type', (new $subjectType)->getMorphClass())
+            ->where('subject_type', static::morphTypeOf($subjectType))
             ->where('subject_id', $subjectId);
     }
 
-    /** Filtra por nome de evento/ação (created, updated, aprovado, ...). */
+    /** Por nome de evento/ação: created, updated, aprovado... */
     public function scopeAction(Builder $query, string|array $action): Builder
     {
         return $query->whereIn('event', (array) $action);
     }
 
-    /** Apenas falhas (as que têm debug_info preenchido). */
+    /** Só as falhas gravadas por auditFailure(). */
     public function scopeFailures(Builder $query): Builder
     {
-        return $query->whereNotNull('debug_info');
+        return $query->whereNotNull('debug_info->error');
     }
 
-    /** Auditorias de um usuário específico. */
+    /** Feitas por um usuário. */
     public function scopeByUser(Builder $query, int|string $userId): Builder
     {
         return $query->where('created_by', $userId);
     }
 
-    /** Auditorias de um batch (uma operação lógica que tocou várias linhas). */
+    /** De um batch (uma operação). */
     public function scopeInBatch(Builder $query, string $batch): Builder
     {
         return $query->where('batch', $batch);
     }
 
     /**
-     * A OPERAÇÃO INTEIRA a que um registro pertenceu.
-     *
-     * Dado um registro (classe + id), descobre o batch da sua auditoria mais
-     * recente e devolve TODAS as auditorias desse batch — de todas as tabelas.
-     * É o fecho do ciclo: você pesquisa pelo cliente e recebe de volta o
-     * produto, os itens e tudo o mais que foi gravado naquela mesma operação.
-     *
-     *   // O cliente foi criado junto com um pedido e seus itens, num batch.
-     *   Audit::operationOf(Cliente::class, $clienteId)->get();
-     *   // -> traz as linhas do cliente, do pedido e dos itens.
-     *
-     * Se o registro tiver várias operações no histórico, considera a mais
-     * recente. Para uma operação específica, use scopeInBatch() com o id do batch.
+     * A ÚLTIMA operação (batch) de que o registro participou, com as linhas
+     * de todas as tabelas. Nenhuma auditoria = consulta vazia.
      */
     public static function operationOf(string $subjectType, int|string $subjectId): Builder
     {
-        $morph = (new $subjectType)->getMorphClass();
-
         $batch = static::query()
-            ->where('subject_type', $morph)
-            ->where('subject_id', $subjectId)
+            ->forRecord($subjectType, $subjectId)
             ->whereNotNull('batch')
             ->latest()
+            ->orderByDesc('id')
             ->value('batch');
 
-        // Sem batch (registro nunca auditado, ou auditado fora de batch):
-        // devolve um builder que não retorna nada, para o chamador poder ->get()
-        // com segurança.
         if ($batch === null) {
             return static::query()->whereRaw('1 = 0');
         }
 
-        return static::query()->inBatch($batch)->oldest();
+        return static::query()->inBatch($batch)->orderBy('id');
+    }
+
+    /**
+     * TODAS as operações (batches) de que o registro participou, com as
+     * linhas de todas as tabelas — o histórico completo.
+     */
+    public static function operationsOf(string $subjectType, int|string $subjectId): Builder
+    {
+        $batches = static::query()
+            ->forRecord($subjectType, $subjectId)
+            ->whereNotNull('batch')
+            ->select('batch');
+
+        return static::query()->whereIn('batch', $batches)->orderBy('id');
+    }
+
+    /** Classe de model → morph class (respeita morphMap); nome livre → ele mesmo. */
+    public static function morphTypeOf(string $subjectType): string
+    {
+        return is_subclass_of($subjectType, Model::class)
+            ? (new $subjectType())->getMorphClass()
+            : $subjectType;
     }
 }

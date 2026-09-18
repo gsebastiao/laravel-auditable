@@ -4,161 +4,113 @@ declare(strict_types=1);
 
 namespace Gsebastiao\Auditable\Concerns;
 
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Gsebastiao\Auditable\AuditManager;
 use Gsebastiao\Auditable\Support\AuditOptions;
+use Gsebastiao\Auditable\Support\ManualAuditPayload;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Throwable;
 
 /**
- * Torna um model Eloquent auditável.
- *
- * Uso:
+ * Torna um model auditável. Basta:
  *
  *   class Produto extends Model
  *   {
  *       use Auditable;
- *
- *       public function getAuditOptions(): AuditOptions
- *       {
- *           return AuditOptions::defaults()
- *               ->except(['updated_at'])
- *               ->resolveMap([
- *                   'status_id' => ResolveMap::direct('Status', 'status', 'nome'),
- *               ]);
- *       }
  *   }
  *
- * Toda a auditoria acontece por eventos Eloquent — nada de DB::table() nem
- * métodos estáticos de escrita. Isto significa que:
- *   - casts e mutators são respeitados (lemos o model hidratado);
- *   - Global Scopes de tenancy são respeitados automaticamente;
- *   - save(), create(), update() e delete() são todos cobertos, sem que o
- *     consumidor precise trocar como escreve.
- *
- * O hook bootAuditable() é chamado pelo Eloquent automaticamente ao inicializar
- * o model (convenção boot{TraitName}), então o boot() do consumidor fica livre.
+ * A partir daí create(), update(), save() e delete() gravam auditoria
+ * sozinhos. Para personalizar, defina getAuditOptions() no model.
  */
 trait Auditable
 {
     /**
-     * Guarda os atributos originais capturados no "updating", para comparar
-     * no "updated". Necessário porque no "updated" o getOriginal() já reflete
-     * o novo estado. Mesma técnica usada pela Spatie.
+     * Estado CRU do registro imediatamente antes do último update,
+     * capturado no evento `updating`. Usado por audit() para refazer o diff
+     * depois de o Eloquent já ter sincronizado o "original".
      *
      * @var array<string, mixed>
      */
     protected array $auditOldAttributes = [];
 
+    public static function bootAuditable(): void
+    {
+        static::updating(function (Model $model): void {
+            $model->auditOldAttributes = $model->getRawOriginal();
+        });
+
+        foreach (['created', 'updated', 'deleted'] as $event) {
+            static::registerModelEvent($event, function (Model $model) use ($event): void {
+                if ($model->getAuditOptions()->allowsEvent($event)) {
+                    app(AuditManager::class)->record($model, $event);
+                }
+            });
+        }
+
+        // Só existe com SoftDeletes; e só é gravado se 'restored' estiver em events().
+        if (method_exists(static::class, 'restored')) {
+            static::registerModelEvent('restored', function (Model $model): void {
+                if ($model->getAuditOptions()->allowsEvent('restored')) {
+                    app(AuditManager::class)->record($model, 'restored');
+                }
+            });
+        }
+    }
+
     /**
-     * Ponto de override do consumidor. O default audita create/update/delete
-     * de todos os atributos, sem resolveMap.
+     * Sobrescreva no seu model para configurar a auditoria. O padrão audita
+     * create/update/delete de todos os campos (menos password e remember_token).
      */
     public function getAuditOptions(): AuditOptions
     {
         return AuditOptions::defaults();
     }
 
-    public static function bootAuditable(): void
+    /** @internal usado pelo AuditManager */
+    public function getAuditOldAttributes(): array
     {
-        static::updating(function (Model $model): void {
-            // Congela o estado anterior (com casts) antes da escrita.
-            $model->auditOldAttributes = $model->getOriginal();
-        });
-
-        foreach (['created', 'updated', 'deleted'] as $event) {
-            static::registerModelEvent($event, function (Model $model) use ($event): void {
-                $options = $model->getAuditOptions();
-
-                if (! in_array($event, $options->events, true)) {
-                    return;
-                }
-
-                app(AuditManager::class)->record($model, $event, $model->auditOldAttributes);
-            });
-        }
-
-        // Suporte a soft delete: audita o restore como um evento próprio, se o
-        // model usar SoftDeletes e o consumidor incluir 'restored' nos eventos.
-        if (method_exists(static::class, 'restored')) {
-            static::registerModelEvent('restored', function (Model $model): void {
-                $options = $model->getAuditOptions();
-
-                if (! in_array('restored', $options->events, true)) {
-                    return;
-                }
-
-                app(AuditManager::class)->record($model, 'restored', []);
-            });
-        }
+        return $this->auditOldAttributes;
     }
 
-    /**
-     * Relação inversa: todas as auditorias deste registro.
-     */
+    // ------------------------------------------------------------------
+    // Consultar
+    // ------------------------------------------------------------------
+
+    /** Todas as auditorias DESTE registro: $produto->audits. */
     public function audits(): MorphMany
     {
         return $this->morphMany(config('auditable.model'), 'subject');
     }
 
     /**
-     * O batch (id) da última operação que tocou este registro. Devolve só o
-     * identificador; para as linhas em si, use operation().
+     * Auditorias de um registro pelo id, sem carregá-lo:
+     *   Produto::auditsFor(42)->get();
+     *   Produto::auditsFor(42)->action('aprovado')->get();
      */
+    public static function auditsFor(int|string $id): Builder
+    {
+        $model = config('auditable.model');
+
+        return $model::query()->forRecord(static::class, $id)->latest()->orderByDesc('id');
+    }
+
+    /** Id do batch da última operação que tocou este registro. */
     public function batchOf(): ?string
     {
-        return $this->audits()->latest()->value('batch');
+        return $this->audits()->latest()->orderByDesc('id')->value('batch');
     }
 
     /**
-     * TUDO o que aconteceu na mesma operação que este registro — atravessando
-     * tabelas. Exatamente o cenário que você descreveu: você tem o cliente em
-     * mãos, chama isto, e recebe de volta o produto, os itens e o próprio
-     * cliente — tudo o que foi gravado naquele mesmo batch.
-     *
-     *   $cliente = Cliente::find($id);
-     *   $cliente->operation()->get();                 // as linhas da operação
-     *   $cliente->operation()->get()->groupBy('subject_type'); // agrupado por tabela
-     *
-     * Versão estática, quando você só tem o id: Cliente::operationFor($id).
-     *
-     * @return \Illuminate\Database\Eloquent\Builder
+     * A ÚLTIMA operação completa em que este registro participou — as linhas
+     * de TODAS as tabelas gravadas no mesmo batch.
      */
-    public function operation(): \Illuminate\Database\Eloquent\Builder
+    public function operation(): Builder
     {
         return static::operationFor($this->getKey());
     }
 
-    /**
-     * Histórico de UM registro específico, por id, SEM precisar carregá-lo.
-     *
-     * Devolve um query builder, então você filtra à vontade:
-     *
-     *   Produto::auditsFor(42)->get();                       // tudo do id 42
-     *   Produto::auditsFor(42)->action('aprovado')->get();   // só aprovações
-     *   Produto::auditsFor(42)->failures()->latest()->first(); // última falha
-     *   Produto::auditsFor(42)->byUser($id)->get();          // por quem fez
-     *
-     * Para o registro que você já tem em mãos, prefira a relação: $produto->audits.
-     */
-    public static function auditsFor(int|string $id): \Illuminate\Database\Eloquent\Builder
-    {
-        $model = config('auditable.model');
-
-        return $model::query()->forRecord(static::class, $id)->latest();
-    }
-
-    /**
-     * A OPERAÇÃO INTEIRA a que um registro deste model pertenceu.
-     *
-     * Descobre o batch da auditoria mais recente do registro e devolve todas as
-     * auditorias desse batch — de TODAS as tabelas envolvidas na operação. É o
-     * "pesquiso o cliente e recebo o pedido + os itens que entraram junto".
-     *
-     *   Cliente::operationFor($clienteId)->get();
-     *
-     * @return \Illuminate\Database\Eloquent\Builder
-     */
-    public static function operationFor(int|string $id): \Illuminate\Database\Eloquent\Builder
+    public static function operationFor(int|string $id): Builder
     {
         $model = config('auditable.model');
 
@@ -166,21 +118,32 @@ trait Auditable
     }
 
     /**
-     * Registra uma AÇÃO DE DOMÍNIO arbitrária sobre este registro.
-     *
-     * Os eventos created/updated/deleted cobrem escritas do Eloquent. Mas
-     * muita coisa que você quer auditar não é uma escrita: "aprovou", "reenviou
-     * o e-mail", "exportou", "fez login". Isso não dispara evento de model
-     * nenhum — então você chama isto explicitamente, com o nome que quiser.
-     *
-     * Equivale ao parâmetro $action livre que os métodos do BaseModel original
-     * recebiam, mas desacoplado da escrita.
-     *
+     * TODAS as operações em que este registro participou (cada batch com as
+     * linhas de todas as tabelas). É o histórico completo, pronto para
+     * agrupar por batch.
+     */
+    public function operations(): Builder
+    {
+        return static::operationsFor($this->getKey());
+    }
+
+    public static function operationsFor(int|string $id): Builder
+    {
+        $model = config('auditable.model');
+
+        return $model::operationsOf(static::class, $id);
+    }
+
+    // ------------------------------------------------------------------
+    // Registrar manualmente
+    // ------------------------------------------------------------------
+
+    /**
+     * Grava uma ação com nome livre (sempre uma linha NOVA):
      *   $pedido->auditAction('aprovado');
-     *   $pedido->auditAction('email_reenviado', ['para' => $email, 'via' => 'ses']);
+     *   $pedido->auditAction('email_reenviado', ['para' => $email]);
      *
-     * @param  string                $action   Nome livre da ação.
-     * @param  array<string, mixed>  $changes  Detalhes opcionais a registrar.
+     * @param  array<string, mixed>  $changes
      */
     public function auditAction(string $action, array $changes = []): void
     {
@@ -188,23 +151,77 @@ trait Auditable
     }
 
     /**
-     * Registra uma FALHA associada a este registro, com debug técnico completo.
+     * Grava uma falha. `changes` recebe só $message (segura para o usuário);
+     * a exceção, o SQL e o trace vão para `debug_info` (só para o dev).
      *
-     * Use no catch de uma operação que você quis auditar mesmo quando dá errado.
-     * O quê fica legível no log; o porquê técnico (stack trace, SQL, request,
-     * ambiente) vai para debug_info — visível ao dev, escondido do usuário.
-     *
-     *   try {
-     *       $fatura->update([...]);
-     *   } catch (\Throwable $e) {
-     *       $fatura->auditFailure('fatura_update', $e, ['payload' => $dados]);
+     *   try { ... } catch (\Throwable $e) {
+     *       $fatura->auditFailure('pagamento', $e, ['gateway' => 'mpesa']);
      *       throw $e;
      *   }
      *
-     * @param  array<string, mixed>  $context  Dados extra p/ o bloco de debug.
+     * @param  array<string, mixed>  $context  Dados extra para investigar (vão para debug_info).
      */
-    public function auditFailure(string $action, \Throwable $exception, array $context = []): void
+    public function auditFailure(string $action, Throwable $exception, array $context = [], ?string $message = null): void
     {
-        app(AuditManager::class)->recordFailure($this, $action, $exception, $context);
+        app(AuditManager::class)->recordFailure($this, $action, $exception, $context, $message);
+    }
+
+    /**
+     * Personaliza a entrada automática que ESTE objeto acabou de gravar.
+     *
+     *   $pedido = Pedido::create($dados)->audit(createdBy: $vendedor->id);
+     *
+     * Regras:
+     *   - Substitui a última entrada automática deste objeto (não cria outra).
+     *   - Se o objeto ainda não gravou nada, cria uma entrada nova.
+     *   - Tudo o que não for passado continua automático.
+     *   - $event só muda o nome gravado ("created" vira "importado", por exemplo).
+     *
+     * Para ACRESCENTAR uma linha em vez de substituir, use auditAction().
+     *
+     * @param  string|null              $batch        Força o batch.
+     * @param  class-string|Model|null  $subjectType  Grava a entrada em nome de OUTRO model.
+     * @param  string|int|null          $subjectId    Id desse outro registro.
+     * @param  string|null              $event        Nome do evento gravado.
+     * @param  array<string,mixed>|null $changes      Conteúdo de `changes` (padrão: automático).
+     * @param  array<string,mixed>|null $debugInfo    Conteúdo de `debug_info` (padrão: automático).
+     * @param  string|int|null          $createdBy    Autor (padrão: usuário logado).
+     * @param  string|int|null          $tenantId     Tenant (só com tenancy por coluna ligado).
+     * @param  string|null              $createdAt    Data 'Y-m-d H:i:s' (padrão: agora).
+     * @param  string|null              $updatedAt    Data 'Y-m-d H:i:s' (padrão: agora).
+     */
+    public function audit(
+        ?string $batch = null,
+        string|Model|null $subjectType = null,
+        string|int|null $subjectId = null,
+        ?string $event = null,
+        ?array $changes = null,
+        ?array $debugInfo = null,
+        string|int|null $createdBy = null,
+        string|int|null $tenantId = null,
+        ?string $createdAt = null,
+        ?string $updatedAt = null,
+    ): static {
+        $resolvedSubjectType = match (true) {
+            $subjectType === null => null,
+            $subjectType instanceof Model => $subjectType->getMorphClass(),
+            is_subclass_of($subjectType, Model::class) => (new $subjectType())->getMorphClass(),
+            default => $subjectType,
+        };
+
+        app(AuditManager::class)->recordManual($this, new ManualAuditPayload(
+            batch: $batch,
+            subjectType: $resolvedSubjectType,
+            subjectId: $subjectId,
+            event: $event,
+            changes: $changes,
+            debugInfo: $debugInfo,
+            createdBy: $createdBy,
+            tenantId: $tenantId,
+            createdAt: $createdAt,
+            updatedAt: $updatedAt,
+        ));
+
+        return $this;
     }
 }

@@ -5,23 +5,29 @@ declare(strict_types=1);
 namespace Gsebastiao\Auditable\Support;
 
 /**
- * Factory para configurações de resolução de labels legíveis na auditoria.
+ * Traduz ids e códigos em nomes legíveis no log de auditoria.
  *
- * O diferencial deste pacote sobre o spatie/laravel-activitylog: em vez de
- * gravar apenas o valor cru de uma FK (ex.: status_id: 2 -> 5), resolve o
- * label humano correspondente (ex.: Status: "Ativo" -> "Bloqueado").
+ *   sem resolveMap:  status_id: 2 → 5
+ *   com resolveMap:  Status: Ativo → Bloqueado
  *
- * Três modos, herdados do BaseModel original mas expostos como uma API
- * fluente e nomeada:
+ * Use dentro de getAuditOptions() (ou de Audit::for(...)->resolveMap()):
  *
- *   direct — busca o label numa tabela pelo valor da FK (caso mais comum).
- *   join   — navega tabelas intermediárias via LEFT JOIN encadeado.
- *   alias  — não consulta o banco; apenas renomeia o campo no log.
+ *   ->resolveMap([
+ *       'status_id'  => ResolveMap::direct('Status', 'status', 'nome'),
+ *       'estado_id'  => ResolveMap::join([...]),
+ *       'preco_venda' => ResolveMap::alias('Preço de venda'),
+ *   ])
+ *
+ * As consultas correm na conexão do model auditado e cada valor é
+ * consultado no máximo uma vez por requisição.
  */
 final class ResolveMap
 {
     /**
-     * Resolução direta: SELECT {column} FROM {table} WHERE {key} = valor.
+     * O caso mais comum: SELECT {column} FROM {table} WHERE {key} = valor.
+     *
+     *   ResolveMap::direct('Status', 'status', 'nome')
+     *   ResolveMap::direct('Tipo', 'tabela_generica', 'descricao', scope: ['grupo' => 'tipo_cliente'])
      *
      * @param  string       $label   Nome legível exibido no log (ex.: "Status").
      * @param  string       $table   Tabela onde buscar o label.
@@ -48,10 +54,15 @@ final class ResolveMap
     }
 
     /**
-     * Resolução por joins encadeados. Cada elo é um array:
-     *   ['table' => ..., 'key' => ...]                        (primeiro elo, âncora pelo valor)
-     *   ['table' => ..., 'on' => [col1, op, col2],
-     *    'column' => ..., 'label' => ...]                     (elos seguintes; label/column no último)
+     * Quando o nome está noutra tabela, a várias ligações de distância.
+     * Exemplo: o campo guarda estado_id, mas você quer mostrar o PAÍS:
+     *
+     *   ResolveMap::join([
+     *       ['table' => 'estados', 'key' => 'id'],                  // 1º elo: onde procurar o valor gravado
+     *       ['table' => 'paises',                                   // elos seguintes: LEFT JOIN
+     *        'on' => ['paises.id', '=', 'estados.pais_id'],
+     *        'column' => 'nome', 'label' => 'País'],               // no último: o que mostrar e com que nome
+     *   ])
      *
      * @param  array<int, array<string, mixed>> $joins
      * @return array<string, mixed>
@@ -65,8 +76,8 @@ final class ResolveMap
     }
 
     /**
-     * Apenas renomeia o campo no log, sem consultar o banco.
-     * Útil para campos que não são FK mas merecem um nome legível.
+     * Só troca o nome do campo no log (não consulta o banco):
+     *   'preco_venda' => ResolveMap::alias('Preço de venda')
      *
      * @return array<string, mixed>
      */

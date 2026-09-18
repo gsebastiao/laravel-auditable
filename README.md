@@ -1,94 +1,238 @@
-# Laravel Audit Table
+# Laravel Auditable
 
-**Auditoria automática para Eloquent que grava _labels legíveis_, não IDs crus.**
+[![License](https://img.shields.io/packagist/l/gsebastiao/laravel-auditable.svg)](LICENSE.md)
+[![PHP Version](https://img.shields.io/packagist/php-v/gsebastiao/laravel-auditable.svg)](composer.json)
+[![Laravel Framework](https://img.shields.io/packagist/dependency-v/gsebastiao/laravel-auditable/illuminate/support.svg)](composer.json)
+[![Latest Version](https://img.shields.io/packagist/v/gsebastiao/laravel-auditable.svg)](https://packagist.org/packages/gsebastiao/laravel-auditable)
 
-Toda vez que um model muda, o Auditable registra quem mudou, o quê, e quando — traduzindo chaves estrangeiras para nomes que um humano entende. Funciona por eventos do Eloquent, então você não muda uma linha da forma como já salva seus dados. Multitenancy é opcional e plugável.
+Guarde automaticamente **quem** mudou **o quê** e **quando** nos seus models
+Eloquent — com nomes legíveis (`Status: Ativo → Bloqueado`) em vez de ids
+soltos (`status_id: 1 → 3`).
 
-<p>
-  <a href="#-português">🇵🇹 Português</a> &nbsp;•&nbsp; <a href="#-english">🇬🇧 English</a>
-</p>
+Você adiciona uma linha ao model e, a partir daí, cada `create()`, `update()`
+e `delete()` fica registrado. Com o histórico gravado, dá para montar telas
+como esta:
 
-<sub>Requer PHP 8.2+ · Laravel 11, 12 ou 13 · Licença MIT</sub>
+| Quando | Quem | O quê | Alterações |
+| --- | --- | --- | --- |
+| 11/07/2026 09:00 | João Santos | updated | Preço: 20 → 25 · Status: Ativo → Bloqueado |
+| 10/07/2026 14:30 | Maria Pereira | created | Nome: Café · Preço: 20 · Status: Ativo |
+
+**O que o pacote faz por você**
+
+- Registra criação, alteração e exclusão sozinho (e restauração, com SoftDeletes).
+- Traduz chaves estrangeiras em nomes legíveis (`resolveMap`).
+- Agrupa várias gravações de uma mesma ação do usuário numa só **operação**.
+- Registra falhas com detalhes técnicos que só o desenvolvedor vê.
+- Recria registros apagados a partir da auditoria.
+- Mostra "criado por / alterado por" numa listagem com uma única consulta.
+- Traz um modal de histórico pronto em JavaScript (opcional).
+- Funciona com multitenancy (opcional).
 
 ---
 
-## O problema que ele resolve
+## Sumário
 
-A maioria dos pacotes de auditoria grava isto quando um pedido muda de status:
-
-```json
-{ "status_id": { "old": 2, "new": 5 } }
-```
-
-E aí alguém abre o log e pergunta: _"o que é status 2? e 5?"_. Ninguém sabe sem ir ao banco.
-
-O Auditable grava isto:
-
-```json
-{ "Status": { "old": "Aguardando pagamento", "new": "Enviado" } }
-```
-
-O mesmo evento. A diferença é que o log **se explica sozinho**. É para isso que o pacote existe.
+1. [Requisitos](#requisitos)
+2. [Instalação](#instalação)
+3. [Primeiros passos](#primeiros-passos)
+4. [O que é (e o que não é) auditado automaticamente](#o-que-é-e-o-que-não-é-auditado-automaticamente)
+5. [Nomes legíveis com `resolveMap`](#nomes-legíveis-com-resolvemap)
+6. [Escolher o que auditar](#escolher-o-que-auditar)
+7. [Quem fez a alteração](#quem-fez-a-alteração)
+8. [Agrupar uma operação (batch)](#agrupar-uma-operação-batch)
+9. [Registrar ações próprias: `auditAction()`](#registrar-ações-próprias-auditaction)
+10. [Personalizar a entrada automática: `audit()`](#personalizar-a-entrada-automática-audit)
+11. [Auditar sem model: `Audit::for()`](#auditar-sem-model-auditfor)
+12. [Consultar o histórico](#consultar-o-histórico)
+13. [Mostrar o histórico numa tela Blade](#mostrar-o-histórico-numa-tela-blade)
+14. [Colunas "criado por / alterado por" numa listagem](#colunas-criado-por--alterado-por-numa-listagem)
+15. [Modal de histórico pronto (JavaScript, opcional)](#modal-de-histórico-pronto-javascript-opcional)
+16. [Restaurar um registro apagado](#restaurar-um-registro-apagado)
+17. [Registrar falhas](#registrar-falhas)
+18. [Multitenancy (opcional)](#multitenancy-opcional)
+19. [Desligar a auditoria](#desligar-a-auditoria)
+20. [Configuração completa](#configuração-completa)
+21. [Personalização avançada](#personalização-avançada)
+22. [Problemas comuns](#problemas-comuns)
+23. [Referência rápida](#referência-rápida)
 
 ---
 
-# 🇵🇹 Português
+## Requisitos
+
+- PHP 8.2 ou mais recente
+- Laravel 11.4+, 12 ou 13
+- Um banco suportado pelo Laravel (MySQL, MariaDB, PostgreSQL, SQLite ou SQL Server)
+
+---
 
 ## Instalação
+
+Rode os quatro comandos abaixo na pasta do seu projeto:
 
 ```bash
 composer require gsebastiao/laravel-auditable
 ```
 
-Publique a configuração e a migration, depois rode a migration:
-
 ```bash
 php artisan vendor:publish --tag=auditable-config
+```
+
+```bash
 php artisan vendor:publish --tag=auditable-migrations
+```
+
+```bash
 php artisan migrate
 ```
 
-Pronto. Nada mais é obrigatório.
+O que cada um faz:
 
-## Começando (2 minutos)
+1. **`composer require`** instala o pacote. O Laravel o encontra sozinho; não
+   precisa registrar nada.
+2. **`--tag=auditable-config`** cria `config/auditable.php`, com todas as
+   opções comentadas. Você só mexe nele se quiser mudar algum padrão.
+3. **`--tag=auditable-migrations`** cria em `database/migrations/` o arquivo
+   que monta a tabela de auditoria.
+4. **`migrate`** cria a tabela (chamada `audit_table`, por padrão).
 
-**Passo 1 —** Adicione o trait `Auditable` a qualquer model:
+> **Os ids dos seus models são UUID ou ULID?** Antes do passo 4, abra a
+> migration criada no passo 3 e troque `'integer'` por `'uuid'` ou `'ulid'` nas
+> três linhas do topo do arquivo. Veja [Meus ids são UUID](#meus-ids-são-uuid-ou-ulid).
+
+---
+
+## Primeiros passos
+
+### 1. Adicione o trait `Auditable` ao model
 
 ```php
-use Illuminate\Database\Eloquent\Model;
+<?php
+
+namespace App\Models;
+
 use Gsebastiao\Auditable\Concerns\Auditable;
+use Illuminate\Database\Eloquent\Model;
 
 class Produto extends Model
 {
     use Auditable;
+
+    protected $fillable = ['nome', 'preco', 'status_id'];
 }
 ```
 
-**É só isso para começar.** A partir de agora, `create`, `update` e `delete`
-deste model são auditados automaticamente:
+Pronto. Não há mais nada a configurar.
+
+### 2. Use o model como sempre usou
 
 ```php
-$produto = Produto::create(['nome' => 'Café', 'preco' => 20]);
+$produto = Produto::create(['nome' => 'Café', 'preco' => 20, 'status_id' => 1]);
+
 $produto->update(['preco' => 25]);
+
+$produto->delete();
 ```
 
-**Passo 2 —** Consulte o histórico a qualquer momento:
+Cada uma dessas três linhas gravou uma linha na tabela de auditoria.
+
+### 3. Veja o histórico
 
 ```php
-$produto->audits;   // coleção com todo o histórico do registro
+$produto->audits()->latest()->get();   // as auditorias deste produto, das mais novas para as mais antigas
 ```
 
-Cada entrada traz o evento (`created`/`updated`/`deleted`), o que mudou, quem
-fez, e quando. Sem configurar mais nada.
+Para experimentar rapidamente sem criar tela nenhuma, use o Tinker:
 
-## Traduzindo IDs para nomes (o diferencial)
-
-Se o seu model tem chaves estrangeiras, diga ao Auditable como transformá-las em
-texto legível. Você faz isso adicionando **um método** ao model:
+```bash
+php artisan tinker
+```
 
 ```php
+App\Models\Produto::auditsFor(1)->get(['event', 'changes']);
+```
+
+### O que fica gravado
+
+Depois do exemplo acima, a tabela de auditoria tem estas três linhas
+(simplificando):
+
+| event | changes |
+| --- | --- |
+| `created` | `{"nome": "Café", "preco": 20, "status_id": 1, "id": 1}` |
+| `updated` | `{"preco": {"old": 20, "new": 25}}` |
+| `deleted` | `{"nome": "Café", "preco": 25, "status_id": 1, "id": 1}` |
+
+Repare:
+
+- No **`created`** e no **`deleted`** fica um retrato do registro (não há
+  "antes" e "depois").
+- No **`updated`** fica **só o que mudou**, no formato `{"old": ..., "new": ...}`.
+- `password`, `remember_token`, `created_at` e `updated_at` do model **não**
+  entram em `changes` (a própria auditoria já tem a sua data).
+
+E estas são todas as colunas da tabela:
+
+| Coluna | O que guarda |
+| --- | --- |
+| `id` | Número da auditoria |
+| `batch` | Id da **operação** — as auditorias de uma mesma ação do usuário têm o mesmo `batch` ([saiba mais](#agrupar-uma-operação-batch)) |
+| `subject_type` | Qual model foi alterado (ex.: `App\Models\Produto`) |
+| `subject_id` | O id do registro alterado |
+| `event` | `created`, `updated`, `deleted`, `restored` ou um nome seu (ex.: `aprovado`) |
+| `changes` | O que mudou, pronto para ler |
+| `debug_info` | Detalhes técnicos: dados de falhas e o retrato usado para restaurar um registro apagado |
+| `created_by` | Id do usuário que estava logado (vazio = ação do sistema) |
+| `created_at` / `updated_at` | Quando aconteceu |
+
+---
+
+## O que é (e o que não é) auditado automaticamente
+
+A auditoria automática funciona pelos **eventos do Eloquent**. Por isso:
+
+| Isto **é** auditado | Isto **não é** auditado |
+| --- | --- |
+| `Produto::create([...])` | `Produto::where(...)->update([...])` (update em massa) |
+| `$produto->update([...])` | `Produto::where(...)->delete()` (delete em massa) |
+| `$produto->save()` | `DB::table('produtos')->insert/update/delete(...)` |
+| `$produto->delete()` | `Produto::insert([...])` e `Produto::upsert(...)` |
+| `$produto->increment('estoque')` | `$produto->saveQuietly()` e código dentro de `Model::withoutEvents()` |
+| `$produto->restore()` (SoftDeletes) | |
+
+Se você precisa auditar uma escrita da coluna da direita, há dois caminhos:
+
+```php
+// 1) Percorrer os models (mais lento, mas cada um gera a sua auditoria)
+Produto::where('categoria_id', 3)->each(fn (Produto $p) => $p->update(['ativo' => false]));
+
+// 2) Fazer a escrita em massa e registrar você mesmo com Audit::for()
+//    (veja "Auditar sem model")
+```
+
+---
+
+## Nomes legíveis com `resolveMap`
+
+Sem ajuda, uma chave estrangeira aparece assim no histórico:
+
+```json
+{"status_id": {"old": 1, "new": 3}}
+```
+
+Ninguém sabe o que é o status 1 ou o 3. Com o `resolveMap`, você diz ao pacote
+onde buscar o nome:
+
+```php
+<?php
+
+namespace App\Models;
+
+use Gsebastiao\Auditable\Concerns\Auditable;
 use Gsebastiao\Auditable\Support\AuditOptions;
 use Gsebastiao\Auditable\Support\ResolveMap;
+use Illuminate\Database\Eloquent\Model;
 
 class Produto extends Model
 {
@@ -96,632 +240,760 @@ class Produto extends Model
 
     public function getAuditOptions(): AuditOptions
     {
-        return AuditOptions::defaults()->resolveMap([
-
-            // status_id: busca o nome na tabela "status"
-            'status_id' => ResolveMap::direct(
-                label:  'Status',   // como aparece no log
-                table:  'status',   // onde buscar
-                column: 'nome',     // qual coluna é o texto
-            ),
-
-        ]);
+        return AuditOptions::defaults()
+            ->resolveMap([
+                'status_id' => ResolveMap::direct('Status', 'status', 'nome'),
+            ]);
     }
 }
 ```
 
-Agora, em vez de `status_id: 2 → 5`, o log grava `Status: "Ativo" → "Bloqueado"`.
+Leia a linha do `resolveMap` assim: *"o campo `status_id` aparece com o nome
+**Status**; o texto está na tabela **status**, coluna **nome**"*. O resultado:
 
-### Os três modos de tradução
-
-| Modo | Quando usar | Exemplo |
-| ------ | ------------- | --------- |
-| `direct` | A FK aponta direto para uma tabela com o nome | `status_id` → tabela `status` |
-| `join` | Precisa navegar por tabelas intermediárias | `estado_id` → `estados` → `paises` |
-| `alias` | Não é FK, só quer renomear o campo no log | `ativo` → "Situação" |
-
-<details>
-<summary><b>Ver exemplos de <code>join</code> e <code>alias</code></b></summary>
-
-```php
-AuditOptions::defaults()->resolveMap([
-
-    // JOIN: resolver o nome do país a partir de estado_id,
-    // navegando estados → paises
-    'estado_id' => ResolveMap::join([
-        ['table' => 'estados', 'key' => 'id'],
-        ['table' => 'paises',
-         'on'     => ['paises.id', '=', 'estados.pais_id'],
-         'column' => 'nome',
-         'label'  => 'País'],
-    ]),
-
-    // ALIAS: campo booleano que só precisa de um nome bonito no log
-    'ativo' => ResolveMap::alias('Situação'),
-
-]);
+```json
+{"Status": {"old": {"id": 1, "label": "Ativo"}, "new": {"id": 3, "label": "Bloqueado"}}}
 ```
 
-</details>
+O id original continua guardado (`id`) ao lado do texto (`label`).
 
-## Escolhendo o que auditar
+### As três formas
 
-O mesmo `getAuditOptions()` controla o resto. Tudo é opcional:
+**`ResolveMap::direct()`** — o caso mais comum: o nome está na tabela para
+onde a chave aponta.
 
 ```php
-AuditOptions::defaults()
-    ->except(['updated_at', 'senha'])   // nunca audita estes campos
-    ->only(['preco', 'status_id'])      // OU: audita só estes
-    ->events(['updated', 'deleted'])    // ignora o "created"
-    ->onlyDirty()                       // só grava o que de fato mudou (padrão)
-    ->logEmpty(false);                  // não grava se nada mudou (padrão)
+'status_id'    => ResolveMap::direct('Status', 'status', 'nome'),
+'categoria_id' => ResolveMap::direct('Categoria', 'categorias', 'titulo'),
+
+// Parâmetros: (nome no log, tabela, coluna com o texto = 'nome', coluna procurada = 'id', filtros extra = [])
+'tipo_id'      => ResolveMap::direct('Tipo', 'tabelas_gerais', 'descricao', scope: ['grupo' => 'tipo_cliente']),
 ```
 
-> Senhas e tokens (`password`, `remember_token`) já são ignorados por padrão.
+**`ResolveMap::join()`** — o nome está noutra tabela, a mais de uma ligação
+de distância. Exemplo: o campo guarda `estado_id`, mas você quer mostrar o
+**país** do estado:
 
-## Operações multi-tabela: um batch, uma história
+```php
+'estado_id' => ResolveMap::join([
+    // 1º item: a tabela onde está o valor gravado no campo
+    ['table' => 'estados', 'key' => 'id'],
+    // itens seguintes: cada ligação (LEFT JOIN); no último, o que mostrar
+    ['table' => 'paises',
+     'on' => ['paises.id', '=', 'estados.pais_id'],
+     'column' => 'nome',
+     'label' => 'País'],
+]),
+```
 
-Este é o cenário que dá sentido ao resto. Você cria um pedido — e junto com ele
-entram o cliente, os itens, uma baixa de estoque. São **escritas em tabelas
-diferentes**, mas fazem parte da **mesma operação**. Você quer poder olhar para
-qualquer uma delas depois e reconstruir a operação inteira.
+**`ResolveMap::alias()`** — não consulta nada, só troca o nome do campo:
 
-Envolva a operação em `Audit::transaction()` (ou `Audit::batch()` se não quiser
-transação). Tudo que for auditado lá dentro — de qualquer model — recebe o
-**mesmo batch**:
+```php
+'preco_venda' => ResolveMap::alias('Preço de venda'),
+```
+
+**Bom saber**
+
+- As consultas são feitas no mesmo banco do model, e cada valor é consultado
+  no máximo uma vez por requisição.
+- Se a linha procurada não existir (ex.: o status foi apagado), o `label` fica
+  `null` e o `id` continua lá.
+
+---
+
+## Escolher o que auditar
+
+Tudo é configurado no método `getAuditOptions()` do model. Os métodos podem ser
+encadeados:
+
+```php
+public function getAuditOptions(): AuditOptions
+{
+    return AuditOptions::defaults()
+        ->events(['created', 'updated'])          // não registrar exclusões
+        ->except(['observacao_interna'])          // nunca mostrar este campo
+        ->resolveMap([
+            'status_id' => ResolveMap::direct('Status', 'status', 'nome'),
+        ]);
+}
+```
+
+| Método | Padrão | Para que serve |
+| --- | --- | --- |
+| `events([...])` | `created`, `updated`, `deleted` | Quais eventos automáticos registrar. Acrescente `restored` se o model usa SoftDeletes. |
+| `only([...])` | todos os campos | Registrar **só** estes campos. |
+| `except([...])` | `password`, `remember_token` | Não mostrar estes campos em `changes`. O que você passar **soma-se** ao padrão. |
+| `neverSnapshot([...])` | `password`, `remember_token` | Nunca guardar estes campos em lugar nenhum (nem em `changes`, nem no retrato de restauro). Use para segredos. |
+| `onlyDirty(false)` | ligado | No `updated`, mostrar também os campos que **não** mudaram. |
+| `logEmpty()` | desligado | Gravar a auditoria mesmo quando nada mudou. |
+| `logTimestamps()` | desligado | Mostrar `created_at` e `updated_at` do model em `changes`. |
+| `fullSnapshotOnDelete(false)` | ligado | Não guardar o retrato que permite [restaurar](#restaurar-um-registro-apagado) um registro apagado. |
+| `resolveMap([...])` | vazio | [Nomes legíveis](#nomes-legíveis-com-resolvemap). |
+
+**`except()` ou `neverSnapshot()`?**
+
+- `except()` é para campos que só **poluem** o histórico. Eles continuam no
+  retrato de restauro, para que o registro volte inteiro se for apagado.
+- `neverSnapshot()` é para **segredos** (tokens, chaves de API): não ficam
+  guardados em lugar nenhum da auditoria.
+
+**Campos criptografados** (cast `encrypted`) aparecem como `********` em
+`changes`: você vê que o campo mudou, mas o valor nunca vai para a auditoria
+em texto claro.
+
+---
+
+## Quem fez a alteração
+
+O id do usuário logado vai sozinho para a coluna `created_by`. Para ler:
+
+```php
+$audit->user?->name;   // null quando a ação foi do sistema
+```
+
+**Quando não há ninguém logado** (comandos `artisan`, filas, agendamentos,
+webhooks), `created_by` fica vazio. Se preferir gravar sempre um usuário (por
+exemplo, um usuário chamado "Sistema" com id 1), coloque no `.env`:
+
+```dotenv
+AUDITABLE_DEFAULT_CREATED_BY=1
+```
+
+**Usa outro guard de login** (ex.: `admin`)? Ajuste em `config/auditable.php`:
+
+```php
+'auth_guard' => 'admin',
+```
+
+**Numa job da fila** ninguém está logado. Para registrar o usuário que pediu a
+tarefa, passe o id dele para a job e use [`audit()`](#personalizar-a-entrada-automática-audit)
+logo depois da gravação:
+
+```php
+public function handle(): void
+{
+    $pedido = Pedido::create($this->dados)->audit(createdBy: $this->userId);
+}
+```
+
+---
+
+## Agrupar uma operação (batch)
+
+Uma única ação do usuário costuma mexer em várias tabelas. Por exemplo,
+"finalizar pedido" cria o pedido, cria os itens e baixa o estoque. Cada
+gravação tem a sua auditoria, mas é útil saber que **todas fazem parte da
+mesma operação**.
+
+É para isso que serve a coluna `batch`. Tudo o que for gravado dentro de
+`Audit::transaction()` recebe o mesmo `batch`:
 
 ```php
 use Gsebastiao\Auditable\Audit;
 
-Audit::transaction(function () use ($dados) {
-    $cliente = Cliente::create($dados['cliente']);
-    $pedido  = Pedido::create(['cliente_id' => $cliente->id, ...]);
+$pedido = Audit::transaction(function () use ($dados) {
+    $pedido = Pedido::create(['cliente_id' => $dados['cliente_id']]);
 
     foreach ($dados['itens'] as $item) {
-        Item::create(['pedido_id' => $pedido->id, ...]);
+        $pedido->itens()->create($item);
+        Produto::find($item['produto_id'])->decrement('estoque', $item['quantidade']);
     }
+
+    return $pedido;
 });
 ```
 
-O cliente, o pedido e todos os itens ficam gravados sob um único batch. E como é
-uma transação, **se qualquer parte falhar, tudo volta atrás** — escritas e
-auditoria juntas.
+`Audit::transaction()` faz duas coisas ao mesmo tempo:
 
-### Recuperando a operação inteira a partir de um registro
+1. Abre uma **transação de banco**: se qualquer linha lançar um erro, nada é
+   gravado — nem os dados, nem as auditorias.
+2. Dá o mesmo **batch** a todas as auditorias lá de dentro.
 
-Agora a parte que você descreveu: você tem **só o cliente** e quer ver tudo que
-entrou junto com ele. Chame `operation()`:
+Se você só quer agrupar, sem transação, use `Audit::batch(fn () => ...)`.
+E se o seu código já usa `DB::transaction()`, pode combinar os dois, em
+qualquer ordem:
 
 ```php
-$cliente = Cliente::find($id);
-
-$cliente->operation()->get();
-// -> devolve as auditorias do cliente, do pedido E dos itens
-//    (tudo o que compartilhou o batch)
+DB::transaction(fn () => Audit::batch(function () {
+    // ...
+}));
 ```
 
-Ou, se você só tem o id:
+### Ver a operação inteira
 
 ```php
-Cliente::operationFor($id)->get();
+$pedido->operation()->get();    // a ÚLTIMA operação em que o pedido participou (todas as tabelas)
+$pedido->operations()->get();   // TODAS as operações do pedido, com todas as linhas de cada uma
+$pedido->audits()->get();       // só as linhas do próprio pedido
+
+Pedido::operationFor(42)->get();    // o mesmo, sem carregar o pedido
+Pedido::operationsFor(42)->get();
+
+Audit::inBatch($batch)->get();      // tudo de um batch
 ```
 
-Como o resultado é um query builder normal, você agrupa por tabela para exibir:
+### Continuar a operação numa fila
+
+Se a operação despacha uma job, passe o batch para ela:
 
 ```php
-$cliente->operation()->get()->groupBy('subject_type');
-// [
-//   'App\Models\Cliente' => [ ... ],
-//   'App\Models\Pedido'  => [ ... ],
-//   'App\Models\Item'    => [ ... ],
-// ]
+// Dentro do Audit::transaction():
+EnviarNotaFiscal::dispatch($pedido->id, Audit::currentBatch());
 ```
 
-> **Precisa só do id do batch?** `$cliente->batchOf()` devolve o identificador da
-> última operação daquele registro — útil para logs ou para passar adiante.
-
-### Propagando o batch para filas
-
-Se parte da operação roda numa job assíncrona e você quer que ela caia no mesmo
-batch, passe o id para a job e reabra lá dentro:
-
 ```php
-// Ao despachar:
-ProcessarPedido::dispatch($pedido, Audit::currentBatch());
+// Na job:
+public function __construct(public int $pedidoId, public ?string $batch) {}
 
-// Dentro da job:
 public function handle(): void
 {
-    Audit::useBatch($this->batchId);
-    // tudo auditado aqui entra no mesmo batch da operação original
+    Audit::useBatch($this->batch, function () {
+        // o que for auditado aqui entra na mesma operação
+    });
 }
 ```
 
-## Ações customizadas (além de create/update/delete)
+`Audit::currentBatch()` devolve `null` fora de uma operação — sem problema:
+nesse caso, `useBatch()` abre uma operação nova.
 
-Os três eventos automáticos cobrem escritas no banco. Mas nem tudo que você quer
-auditar é uma escrita — "aprovou o pedido", "reenviou o e-mail", "fez login",
-"exportou". Para esses, chame `auditAction()` com o nome que quiser:
+---
+
+## Registrar ações próprias: `auditAction()`
+
+Nem tudo o que importa é um `create`, `update` ou `delete`. Para registrar
+qualquer outro acontecimento, dê-lhe um nome:
 
 ```php
 $pedido->auditAction('aprovado');
 
-$pedido->auditAction('email_reenviado', [
-    'para' => $cliente->email,
-    'via'  => 'ses',
-]);
+$pedido->auditAction('email_reenviado', ['para' => $cliente->email]);
+
+$relatorio->auditAction('exportado', ['formato' => 'PDF']);
 ```
 
-Fica no mesmo histórico dos eventos automáticos, com o nome que você deu.
+O segundo parâmetro (opcional) vai para `changes`. **`auditAction()` sempre
+cria uma linha nova.**
 
-## Consultar o histórico de um registro específico
+---
 
-`$produto->audits` te dá o histórico do model que você **já carregou**. Quando
-você tem só o **id**, ou quer **filtrar**, use `auditsFor()` — que devolve um
-query builder:
+## Personalizar a entrada automática: `audit()`
+
+Às vezes você quer que a auditoria automática saia **diferente**: com outro
+autor, outro nome de evento ou informações extra. É para isso que existe
+`audit()`:
 
 ```php
-// Tudo do registro 42, sem precisar carregar o Produto
-Produto::auditsFor(42)->get();
+// Outro autor (ex.: numa job da fila)
+$pedido = Pedido::create($dados)->audit(createdBy: $this->userId);
 
-// Só as aprovações
-Produto::auditsFor(42)->action('aprovado')->get();
+// Outro nome de evento: em vez de "created", grava "importado"
+$produto = Produto::create($linha)->audit(event: 'importado');
 
-// A última alteração feita por um usuário
-Produto::auditsFor(42)->byUser($userId)->latest()->first();
-
-// Só as falhas deste registro
-Produto::auditsFor(42)->failures()->get();
+// Informação técnica extra
+$produto->update($dados);
+$produto->audit(debugInfo: ['origem' => 'api-parceiro']);
 ```
 
-Filtros disponíveis: `action()`, `byUser()`, `failures()`, `inBatch()`.
+**As regras são simples:**
 
-## Colunas de auditoria numa listagem (DataTable)
+1. `audit()` **substitui** a entrada automática que **este objeto** acabou de
+   gravar. Não cria uma segunda linha.
+2. Se o objeto ainda não gravou nada (por exemplo, acabou de ser carregado com
+   `find()`), `audit()` cria uma entrada nova.
+3. O que você não passar continua automático.
+4. É seguro com muitos usuários ao mesmo tempo: `audit()` só mexe na entrada
+   do objeto em que foi chamado, nunca na de outra pessoa ou de outro registro.
 
-As relações acima respondem "qual é o histórico **deste** registro?". Uma **grelha**
-faz outra pergunta, sobre **muitos** registros de uma vez: "para cada linha desta
-página, quem criou e quando? quem alterou por último e quando?". Resolver isso com
-a relação seria um **N+1** — uma consulta de auditoria por linha exibida.
+**`audit()` ou `auditAction()`?**
 
-`AuditColumnJoiner` resolve de outro jeito: anexa `audit_created_by`,
-`audit_created_at`, `audit_updated_by`, `audit_updated_at` como **colunas** na
-própria query, via `LEFT JOIN` de subconsultas agregadas. Uma query só, sem N+1,
-pronta para o DataTable ordenar e paginar.
+| | `audit()` | `auditAction()` |
+| --- | --- | --- |
+| Cria uma linha nova? | Não: ajusta a entrada automática que o objeto acabou de gravar | Sempre |
+| Para quê | Mudar autor, data, dados ou nome do evento da entrada automática | Registrar um acontecimento a mais |
+
+**Todos os parâmetros de `audit()`** (todos opcionais, use por nome):
+
+| Parâmetro | O que muda |
+| --- | --- |
+| `event` | O nome do evento gravado |
+| `changes` | O conteúdo de `changes` (array) |
+| `debugInfo` | O conteúdo de `debug_info` (array) |
+| `createdBy` | O autor |
+| `createdAt` / `updatedAt` | As datas (`'Y-m-d H:i:s'`) |
+| `batch` | A operação |
+| `subjectType` / `subjectId` | Grava a entrada em nome de **outro** registro |
+| `tenantId` | O tenant (só com [multitenancy](#multitenancy-opcional) ligado) |
+
+---
+
+## Auditar sem model: `Audit::for()`
+
+Use quando a gravação não passa pelo Eloquent: `DB::table()`, updates em
+massa ou tabelas que não têm model.
 
 ```php
+use Gsebastiao\Auditable\Audit;
+use Gsebastiao\Auditable\Support\ResolveMap;
+use Illuminate\Support\Facades\DB;
+
+DB::table('pessoas')->where('id', $id)->update(['estado_id' => 7]);
+
+Audit::for('pessoa', $id, 'updated')
+    ->changes(['estado_id' => ['old' => 3, 'new' => 7]])
+    ->resolveMap(['estado_id' => ResolveMap::direct('Estado', 'estados')])
+    ->save();
+```
+
+- Os três parâmetros são: **o tipo** (um nome livre, como `'pessoa'`, ou a
+  classe de um model), **o id** e **o evento**.
+- **Nada é gravado antes do `->save()`.**
+- `changes()` aceita o formato de alteração (`['campo' => ['old' => ..., 'new' => ...]]`)
+  ou um retrato (`['campo' => valor]`). O pacote reconhece qual é.
+- Se o tipo for a classe de um model (`Produto::class`), as opções do
+  `getAuditOptions()` dele (como o `resolveMap`) são aproveitadas.
+- Também pode encadear: `except()`, `only()`, `events()`, `onlyDirty()`,
+  `logEmpty()`, `resolveMap()`, `debugInfo()`, `batch()`, `createdBy()`,
+  `tenantId()`, `createdAt()` e `updatedAt()`.
+
+Exemplo com um update em massa, tudo numa operação:
+
+```php
+$ids = Produto::where('categoria_id', 3)->pluck('id');
+
+Audit::transaction(function () use ($ids) {
+    Produto::whereIn('id', $ids)->update(['ativo' => false]);
+
+    foreach ($ids as $id) {
+        Audit::for(Produto::class, $id, 'updated')
+            ->changes(['ativo' => ['old' => true, 'new' => false]])
+            ->save();
+    }
+});
+```
+
+> Versões anteriores usavam `DB::table('x')->audit(...)`. Continua a funcionar
+> e faz o mesmo que `Audit::for(...)` (a tabela do `DB::table()` não é usada).
+
+---
+
+## Consultar o histórico
+
+```php
+use Gsebastiao\Auditable\Audit;
+
+// De um registro
+$produto->audits()->latest()->get();
+Produto::auditsFor(42)->get();                      // sem carregar o produto (já vem do mais novo para o mais antigo)
+Produto::auditsFor(42)->action('updated')->get();
+
+// Da aplicação inteira
+Audit::byUser(auth()->id())->latest()->limit(20)->get();
+Audit::action(['aprovado', 'reprovado'])->get();
+Audit::failures()->whereDate('created_at', today())->get();
+Audit::forRecord(Produto::class, 42)->get();
+```
+
+Filtros disponíveis (todos encadeáveis, e ainda funcionam `where()`,
+`latest()`, `paginate()` etc.):
+
+| Filtro | O que traz |
+| --- | --- |
+| `action('updated')` ou `action([...])` | Pelo nome do evento |
+| `byUser($id)` | Feitas por um usuário |
+| `inBatch($batch)` | De uma operação |
+| `failures()` | Só as [falhas](#registrar-falhas) |
+| `forRecord(Produto::class, $id)` | De um registro |
+
+Em cada auditoria:
+
+```php
+$audit->user;            // o usuário (ou null)
+$audit->subject;         // o registro auditado (null se foi apagado) — só em auditorias de models
+$audit->changes;         // array com o que mudou
+$audit->changeLines();   // o mesmo, em texto: ['Preco: 20 → 25', 'Status: Ativo → Bloqueado']
+$audit->isFailure();     // foi uma falha?
+```
+
+> `$audit->subject` só funciona quando `subject_type` é um model. Numa auditoria
+> gravada com um nome livre (`Audit::for('pessoa', ...)`), use `subject_type` e
+> `subject_id` diretamente.
+
+> `Audit::` (de `Gsebastiao\Auditable\Audit`) aceita qualquer consulta do model
+> de auditoria. Se preferir usar o model diretamente, ele é
+> `Gsebastiao\Auditable\Models\Audit`.
+
+**Evite consultas repetidas**: ao listar auditorias com o nome do usuário,
+carregue os usuários de uma vez com `with('user')`.
+
+---
+
+## Mostrar o histórico numa tela Blade
+
+No controller:
+
+```php
+public function show(Produto $produto)
+{
+    $historico = $produto->audits()->with('user')->latest()->get();
+
+    return view('produtos.show', compact('produto', 'historico'));
+}
+```
+
+Na view:
+
+```blade
+<table>
+    <thead>
+        <tr><th>Quando</th><th>Quem</th><th>O quê</th><th>Alterações</th></tr>
+    </thead>
+    <tbody>
+        @foreach ($historico as $audit)
+            <tr>
+                <td>{{ $audit->created_at->format('d/m/Y H:i') }}</td>
+                <td>{{ $audit->user?->name ?? 'Sistema' }}</td>
+                <td>{{ $audit->event }}</td>
+                <td>
+                    @foreach ($audit->changeLines() as $linha)
+                        {{ $linha }}<br>
+                    @endforeach
+                </td>
+            </tr>
+        @endforeach
+    </tbody>
+</table>
+```
+
+Quer um nome mais bonito para um campo (ex.: "Preço" em vez de "Preco")? Use
+`ResolveMap::alias('Preço')` no `resolveMap`.
+
+---
+
+## Colunas "criado por / alterado por" numa listagem
+
+Numa listagem com muitos registros, buscar a auditoria de cada linha seria
+lento. O `AuditColumnJoiner` acrescenta essas colunas à **mesma** consulta da
+listagem:
+
+```php
+use App\Models\Produto;
 use Gsebastiao\Auditable\Support\AuditColumnJoiner;
 
-// Na sua query de listagem:
-$query = Produto::query()->where('ativo', 1);
+$query = Produto::query()->where('ativo', true);
 
 AuditColumnJoiner::apply($query, Produto::class);
-// agora cada linha traz: audit_created_by, audit_created_at, audit_updated_by, audit_updated_at
+
+$produtos = $query->paginate(20);
 ```
 
-**Por que o prefixo `audit_`?** Porque `created_at`, `updated_at` e `deleted_at` são
-colunas **nativas** do Eloquent, com cast automático de datetime. Se emitíssemos uma
-coluna chamada `created_at`, ela colidiria com a nativa da própria tabela e o
-Eloquent tentaria dar cast na string já formatada (`10/07/2026 14:30`) — e
-quebraria. Prefixar **todas** as colunas na raiz elimina a colisão de vez e, de
-quebra, mantém o par `_by`/`_at` sempre consistente — sem exceções nem sufixos
-especiais. Toda ação sai igual: `audit_restored_by`/`audit_restored_at`,
-`audit_aprovado_by`/`audit_aprovado_at`. O prefixo é configurável (parâmetro
-`prefix:` ou `config('auditable.column_prefix')`).
+Cada produto ganha quatro colunas:
 
-**Por que só `created` e `updated` por padrão?** Numa grelha normal de um model com
-`SoftDeletes`, o global scope já esconde os apagados — então uma coluna
-`audit_deleted_by` ficaria sempre vazia, custando dois `JOIN` por linha à toa. Só
-inclua `deleted`/`restored` quando a **própria grelha** for uma lixeira:
+```blade
+@foreach ($produtos as $produto)
+    {{ $produto->nome }}
+    — criado por {{ $produto->audit_created_by }} em {{ $produto->audit_created_at }}
+    — alterado por {{ $produto->audit_updated_by ?? '-' }} em {{ $produto->audit_updated_at ?? '-' }}
+@endforeach
+```
+
+- `audit_created_*` vem da **primeira** auditoria `created`; `audit_updated_*`
+  vem da **mais recente** `updated`. Registros nunca alterados ficam com `null`.
+- O nome do usuário é encurtado para "Primeiro Último" ("Maria da Silva
+  Pereira" → "Maria Pereira") e a data sai como `10/07/2026 14:30:00`.
+- Funciona também com `DB::table('produtos')`.
+
+Opções (todas por nome):
 
 ```php
-// Grelha de lixeira: aí sim faz sentido "quem apagou / quando"
 AuditColumnJoiner::apply(
-    Produto::onlyTrashed(),
+    $query,
     Produto::class,
-    actions: ['deleted', 'restored'],
+    actions: ['created', 'updated', 'aprovado'],   // cada ação vira audit_<acao>_by e audit_<acao>_at
+    userColumn: 'email',                           // coluna da tabela de usuários a mostrar
+    dateFormat: 'DD/MM/YYYY',                      // ou null para a data crua
 );
-
-// Exibir por email em vez de nome
-AuditColumnJoiner::apply($query, Produto::class, userColumn: 'email');
-
-// Ações de domínio também viram coluna (a última ocorrência)
-AuditColumnJoiner::apply($query, Produto::class, actions: ['created', 'aprovado']);
-// → audit_aprovado_by, audit_aprovado_at
 ```
 
-Cada ação = **dois** `LEFT JOIN` (a subconsulta de auditoria + a tabela `users`).
-Peça só o que a grelha vai mostrar. Índice recomendado na tabela de auditoria:
-`(subject_type, event, subject_id, id)`.
+> **Requisito:** a tabela de auditoria precisa estar no mesmo banco da
+> listagem. Não funciona se `AUDITABLE_CONNECTION` apontar para outro banco.
 
-> **Quando usar o quê:** MUITAS linhas, um resumo por linha → `AuditColumnJoiner`.
-> UMA linha, o histórico todo → `$model->audits` / `auditsFor()`.
+---
 
-## Widget JS: um modal de histórico pronto (100% OPCIONAL)
+## Modal de histórico pronto (JavaScript, opcional)
 
-> **Isto é totalmente opcional.** Tudo que você leu até aqui — gravar auditoria,
-> consultar `$model->audits`, montar colunas com `AuditColumnJoiner` — funciona
-> 100% sem nada do que vem a seguir. Esta seção existe só para quem não quer
-> escrever HTML/CSS/JS do zero para mostrar esse histórico numa tela. Se você
-> prefere montar sua própria interface (ou já tem uma), pode pular esta seção
-> inteira sem perder nenhuma funcionalidade do pacote.
+> Esta seção é **opcional**. Tudo o que foi explicado até aqui funciona sem ela.
 
-### O que é
+O pacote traz um arquivo JavaScript que abre um **modal** (janela por cima da
+página) com o histórico de um registro. Não depende de jQuery, Bootstrap nem
+de nenhuma outra biblioteca, e não precisa de HTML nenhum na página.
 
-Um único arquivo JavaScript (`audit-table.init.js`) que abre um **modal**
-("popup") mostrando o histórico de um registro, quando você clica em algum
-botão da sua tela. Ele:
+Há dois modais:
 
-- **Não tem nenhuma dependência.** Sem jQuery, sem Bootstrap, sem
-  DataTables. Um `<script>` só, e pronto — o HTML do modal, o CSS e o
-  comportamento (busca, filtro, paginação) são todos gerados pelo próprio
-  arquivo, em tempo real, quando você abre o modal.
-- **Não conflita com o visual do seu site.** Todo o CSS injetado usa nomes de
-  classe exclusivos, sempre começando com `ga-audit-` (ex.: `ga-audit-modal`,
-  `ga-audit-table`). Nunca usa nomes genéricos como `.modal` ou `.table`, que
-  são exatamente os nomes que frameworks como Bootstrap ou AdminLTE já usam —
-  então não existe risco de o CSS do seu template "vazar" para dentro do
-  modal, nem o contrário.
-- **Funciona em qualquer tamanho de tela.** Em celular, o modal ocupa a tela
-  inteira (mais fácil de usar com o dedo); em telas maiores, aparece
-  centralizado como um popup comum.
-
-### Os dois modais
-
-O arquivo registra um objeto global chamado `GaAudit`, com **dois widgets
-independentes**. Você pode usar um, o outro, ou os dois — são pensados para
-públicos diferentes:
-
-| Widget | Pra quem | O que mostra |
+| Modal | Para quem | O que mostra |
 | --- | --- | --- |
-| `GaAudit.full` | Quem tem permissão de auditor/admin | Histórico completo: busca, filtro por ação, paginação, alterações agrupadas por batch |
-| `GaAudit.simple` | Qualquer usuário do sistema | Lista direta e enxuta: o quê, quem, quando — sem filtros |
+| `GaAudit.full` | Administradores/auditores | Histórico completo, agrupado por operação, com busca, filtro e paginação |
+| `GaAudit.simple` | Qualquer usuário | Lista simples: o quê, quem e quando |
 
-### Passo 1 — Publicar o arquivo
+### Passo 1 — Copie o arquivo para `public/`
 
-O arquivo já vem dentro do pacote (em `vendor/gsebastiao/laravel-auditable/src/plugin/audit-table.init.js`),
-mas o navegador só consegue acessar arquivos que estão dentro da pasta
-`public/` do seu projeto Laravel. Por isso existe um comando que **copia** o
-arquivo para lá:
-
-```
+```bash
 php artisan auditable:publish-js
 ```
 
-Por padrão, isso cria o arquivo em `public/assets/js/audit-table.init.js`.
+O arquivo vai para `public/assets/js/audit-table.init.js`. Para outra pasta,
+use `--path=js/auditoria`. Depois de atualizar o pacote, rode de novo com
+`--force` para pegar a versão nova.
 
-**Quer publicar em outro lugar?** Duas formas:
+### Passo 2 — Inclua no layout
 
-```
-# Só para esta execução (não muda nada permanentemente):
-php artisan auditable:publish-js --path=js/vendor/auditoria
+No layout Blade (ex.: `resources/views/layouts/app.blade.php`):
 
-# Para sempre, editando o config publicado (config/auditable.php):
-'js' => [
-    'publish_path' => 'js/vendor/auditoria',
-],
-```
-
-**Atualizando o pacote e quer pegar uma versão nova do arquivo JS?** Rode de
-novo com `--force`, para sobrescrever o que já está publicado:
-
-```
-php artisan auditable:publish-js --force
+```blade
+<head>
+    {{-- ... --}}
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+</head>
+<body>
+    {{-- ... --}}
+    <script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
+</body>
 ```
 
-> **Alternativa:** se seu projeto já usa um bundler (Vite, Mix, Webpack…) e
-> você prefere que o `audit-table.init.js` passe pelo MESMO pipeline de build
-> do resto do seu JS, ignore o comando acima e simplesmente copie o arquivo
-> de dentro de `vendor/gsebastiao/laravel-auditable/src/plugin/` para dentro
-> da sua pasta de assets (ex.: `resources/js/vendor/`), e importe normalmente.
+A tag `csrf-token` é **obrigatória**: sem ela o Laravel recusa o pedido do
+modal (erro 419).
 
-### Passo 2 — Incluir na página
+### Passo 3 — Crie as rotas
 
-No seu layout Blade (ex.: `resources/views/layouts/app.blade.php`), antes do
-`</body>`:
+Em `routes/web.php`. O `AuditWidget` já devolve o JSON no formato que o modal
+espera:
 
-```
-<script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
-```
-
-(Troque `assets/js` pelo caminho que você escolheu no Passo 1, se mudou o
-padrão.)
-
-### Passo 3 — Criar a rota que alimenta o modal
-
-O widget JS **não sabe nada sobre o seu banco de dados** — ele só sabe fazer
-uma requisição `POST` para uma URL que você fornece, e espera um JSON de
-volta num formato específico. Quem monta essa resposta é uma rota Laravel
-comum, que você escreve, chamando os métodos do pacote que você já viu nas
-seções anteriores deste README.
-
-**Para o modal `GaAudit.full`** (histórico completo, agrupado por batch):
-
-```
-// routes/web.php
+```php
 use App\Models\Produto;
+use Gsebastiao\Auditable\Support\AuditWidget;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Route;
 
-Route::post('/audit/readGrouped', function (Request $request) {
-    $groups = Produto::operationFor($request->input('id'))
-        ->get()
-        ->groupBy('batch')
-        ->map(fn ($actions, $batchId) => [
-            'batch_id' => $batchId,
-            'actions' => $actions->map(fn ($audit) => [
-                'action' => $audit->event,
-                'created_by' => User::find($audit->created_by, ['name'])->name,
-                'type' => $audit->is_failure ? 'failed' : 'success',
-                'created_at' => $audit->created_at->format('d/m/Y H:i'),
-                'changes' => $audit->changes,
-            ]),
-        ])
-        ->values();
+Route::middleware('auth')->group(function () {
+    // Para o GaAudit.full
+    Route::post('/auditoria/produtos/completo', function (Request $request) {
+        $id = $request->integer('id');
 
-    return response()->json([
-        'record_id' => $request->input('id'),
-        'groups' => $groups,
-    ]);
-})->middleware('auth'); // proteja com permissão de auditor
-```
+        return AuditWidget::full(Produto::operationsFor($id), recordId: $id);
+    });
 
-**Para o modal `GaAudit.simple`** (lista enxuta, sem agrupar):
-
-```
-// routes/web.php
-use App\Models\Produto;
-use Illuminate\Http\Request;
-
-Route::post('/audit/read', function (Request $request) {
-    $audits = Produto::auditsFor($request->input('id'))
-        ->latest()
-        ->limit(50)
-        ->get()
-        ->map(fn ($audit) => [
-            'action' => $audit->event,
-            'created_by' => User::find($audit->created_by, ['name'])->name,
-            'created_at' => $audit->created_at->format('d/m/Y H:i'),
-        ]);
-
-    return response()->json(['audits' => $audits]);
-})->middleware('auth');
-```
-
-> Os exemplos acima usam nomes de rota (`/audit/readGrouped`, `/audit/read`)
-> só como sugestão — use os nomes e o middleware que fizerem sentido no seu
-> projeto. O que importa é o **formato do JSON de resposta**, não a URL em
-> si. Se preferir, use um Controller normal em vez de uma Closure na rota.
-
-### Passo 4 — Abrir o modal
-
-Duas formas, à sua escolha:
-
-**Forma A — atributos `data-*` (não precisa escrever JS nenhum):**
-
-```
-<button
-    data-ga-audit="full"
-    data-ga-audit-id="{{ $produto->id }}"
-    data-ga-audit-url="/audit/readGrouped">
-    Ver histórico completo
-</button>
-
-<button
-    data-ga-audit="simple"
-    data-ga-audit-id="{{ $produto->id }}"
-    data-ga-audit-url="/audit/read">
-    Ver histórico
-</button>
-```
-
-O widget já escuta cliques em qualquer elemento com `data-ga-audit` na
-página — não precisa registrar nada manualmente.
-
-**Forma B — chamando via JavaScript (mais controle):**
-
-```
-document.getElementById('meuBotao').addEventListener('click', function () {
-    GaAudit.full.open({
-        endpoint: '/audit/readGrouped',
-        id: 42,
-        title: 'Histórico do Produto #42', // opcional
+    // Para o GaAudit.simple
+    Route::post('/auditoria/produtos/resumo', function (Request $request) {
+        return AuditWidget::simple(Produto::auditsFor($request->integer('id')));
     });
 });
 ```
 
-> `title` é opcional em ambas as formas. Sem ele, `GaAudit.full` usa
-> "Histórico de Auditoria" e `GaAudit.simple` usa "Auditoria do Registro"
-> como título padrão — passe `title` (ou `data-ga-audit-title` na Forma A)
-> só quando quiser um texto diferente desse.
+> **Quem pode ver o histórico completo?** Proteja a rota com uma permissão.
+> Por exemplo, acrescente `->can('ver-auditoria')` depois do `Route::post(...)`
+> e defina a regra no `boot()` do `AppServiceProvider`:
+>
+> ```php
+> use Illuminate\Support\Facades\Gate;
+>
+> Gate::define('ver-auditoria', fn ($user) => $user->is_admin);
+> ```
 
-### O modal não precisa de nenhum HTML na página
+### Passo 4 — Abra o modal
 
-Ao contrário de um modal Bootstrap tradicional, você **não** precisa deixar
-um `<div id="algumModal">...</div>` escondido em algum lugar do layout. O
-widget cria todo o HTML do modal em memória quando você abre, e o remove por
-completo quando você fecha. Isso é o que a pergunta original sobre
-"integrar o modal dentro do plugin" resolve: zero HTML externo, zero
-configuração de layout, funciona em qualquer página onde o `<script>` esteja
-incluído.
+Sem escrever JavaScript, com atributos `data-*`:
 
-### Customizando cores e ícones
-
-O visual usa variáveis CSS, então dá pra ajustar cor, raio de borda etc. sem
-tocar no arquivo do pacote — basta sobrescrever no CSS do seu próprio site:
-
+```blade
+<button type="button"
+        data-ga-audit="full"
+        data-ga-audit-id="{{ $produto->id }}"
+        data-ga-audit-url="/auditoria/produtos/completo"
+        data-ga-audit-title="Histórico do produto">
+    Ver histórico
+</button>
 ```
+
+Troque `full` por `simple` (e a URL) para o modal simples. O título é
+opcional. Se preferir chamar pelo seu próprio JavaScript:
+
+```js
+GaAudit.full.open({
+    endpoint: '/auditoria/produtos/completo',
+    id: 42,
+    title: 'Histórico do produto #42', // opcional
+});
+```
+
+### Personalizar o visual
+
+As cores usam variáveis CSS. Sobrescreva no CSS do seu site:
+
+```css
 :root {
-    --ga-audit-accent: #7c3aed;   /* cor de destaque (botões, foco, paginação) */
+    --ga-audit-accent: #7c3aed;   /* botões, foco e paginação */
     --ga-audit-radius: 4px;       /* cantos do modal */
 }
 ```
 
-Os ícones (lupa da busca, setas da paginação, "x" de fechar) são caracteres
-Unicode simples por padrão — leves e sem depender de nenhuma fonte de ícone
-externa. Se preferir usar SVG ou outra fonte de ícones, sobrescreva antes de
-abrir o primeiro modal:
+Outras variáveis: `--ga-audit-bg`, `--ga-audit-text`, `--ga-audit-border`,
+`--ga-audit-success`, `--ga-audit-danger` e `--ga-audit-font`.
 
-```
-<script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
+Para trocar os ícones, defina-os depois de incluir o script:
+
+```html
 <script>
     GaAudit.icons.close = '<svg width="14" height="14">...</svg>';
 </script>
 ```
 
-### Sobre o idioma dos textos
+Os textos da interface estão em português. Para outro idioma, edite o arquivo
+publicado em `public/` (é JavaScript comum, sem compilação).
 
-Os textos fixos da interface (rótulos "Ação:", "Linhas:", "Buscar:",
-cabeçalhos de coluna, mensagens como "Carregando…" ou "Nenhum resultado
-encontrado") estão em português, fixos no arquivo. Só o `title` do modal é
-customizável hoje (veja o Passo 4 acima). Se seu projeto precisa desses
-textos em outro idioma, por enquanto a forma de fazer isso é editar o arquivo
-publicado diretamente — ele é só JavaScript comum, sem etapa de build. Tornar
-esses textos configuráveis é algo que pode entrar em uma versão futura do
-pacote.
+---
 
-## Sobrevivendo a um hard delete: o retrato de restauro
+## Restaurar um registro apagado
 
-A tabela de auditoria é **append-only e imutável** — de propósito, ela **não** usa
-soft delete. Um registro de auditoria que pode ser apagado deixa de servir para
-auditar quem apaga coisas. O que precisa de proteção é o **dado de negócio**, e a
-proteção é outra.
-
-No evento `deleted`, além do `changes` legível, o pacote grava em
-`debug_info['restore']` um **retrato integral e cru** do registro — todos os campos
-e valores, ignorando as restrições de `only()`/`except()` do log legível. É esse
-retrato que permite reconstruir a linha mesmo depois de um **hard delete** (sem
-`SoftDeletes`), em que a linha some de verdade da tabela de origem.
+Quando um registro é apagado, a auditoria `deleted` guarda um retrato completo
+dele. Com esse retrato, o registro pode ser recriado:
 
 ```php
-// Alguém deu um hard delete num Produto. A linha sumiu — mas a auditoria guardou.
-$audit = Produto::auditsFor($id)->action('deleted')->latest()->first();
+$audit = Produto::auditsFor($id)->action('deleted')->first();
 
-$audit->isRestorable();   // true, se o retrato foi gravado
-$produto = $audit->restore();   // a linha VOLTA à tabela original, com o id original
+$produto = $audit->restore();
 ```
 
-O retrato é cru (valores e FKs como eram), então o registro volta **idêntico**,
-incluindo o id. Duas garantias importantes:
+O registro volta **exatamente** como estava no banco: o mesmo id, as mesmas
+datas e os mesmos valores (inclusive JSON e campos criptografados).
 
-- **Segredos não voltam.** Campos em `neverSnapshot` (por padrão `password`,
-  `remember_token`) **nunca** entram no retrato — nem para restaurar. Voltam nulos;
-  trate-os no seu fluxo se preciso.
-- **`changes` continua legível.** O retrato de restauro é técnico e vai para
-  `debug_info` (do dev). O `changes` do delete continua sendo o snapshot legível,
-  para humanos. Uma preocupação para leitura, outra para reconstrução — separadas.
+Variações:
 
 ```php
-// Restaurar deixando o banco atribuir um id novo (evita conflito se o id foi reusado)
-$produto = $audit->restore(withId: false);
+$audit->restore(withId: false);   // recria com um id novo
+
+// Campos de neverSnapshot() (como password) não foram guardados.
+// Se a coluna for obrigatória, informe um valor:
+$audit->restore(attributes: ['password' => Hash::make(Str::random(16))]);
+
+$audit->isRestorable();           // esta auditoria pode ser restaurada?
 ```
 
-Ligado por padrão. Se um model tiver campos volumosos que você não quer duplicar na
-auditoria, desligue por model:
+**Bom saber**
 
-```php
-public function getAuditOptions(): AuditOptions
-{
-    return AuditOptions::defaults()->fullSnapshotOnDelete(false);
-}
-```
+- Só auditorias `deleted` podem ser restauradas.
+- Se já existir um registro com o mesmo id, `restore()` lança um erro que
+  explica o que fazer.
+- Em models com **SoftDeletes**, o registro apagado continua na tabela (na
+  "lixeira"): use o `$produto->restore()` do próprio Laravel. O restauro pela
+  auditoria serve para exclusões definitivas (`forceDelete()` ou models sem
+  SoftDeletes).
+- O registro recriado gera uma auditoria `created` nova, então o histórico
+  mostra "apagado" e depois "criado".
 
-Ou globalmente, em `config/auditable.php`, no bloco `restore`.
+---
 
-## Auditando falhas (o debug que só o dev vê)
+## Registrar falhas
 
-Quando uma operação pode falhar e você quer registrar **por que** falhou, use
-`auditFailure()` dentro do `catch`. Ele separa duas coisas:
-
-- **`changes`** — uma mensagem amigável, que o usuário pode ver.
-- **`debug_info`** — stack trace, SQL, request, ambiente. Só para o desenvolvedor.
+Quando algo dá errado, você pode registrar a falha. O usuário vê uma mensagem
+simples; os detalhes técnicos ficam guardados só para o desenvolvedor.
 
 ```php
 try {
-    $fatura->update($dados);
+    $gateway->cobrar($fatura);
 } catch (\Throwable $e) {
-    $fatura->auditFailure('fatura_update', $e, [
-        'payload' => $dados,   // contexto extra que ajuda a investigar
-    ]);
+    $fatura->auditFailure('cobranca', $e, ['gateway' => 'mpesa'], 'Não foi possível concluir o pagamento.');
 
-    throw $e;   // relança — auditar não engole o erro
+    throw $e;
 }
 ```
 
-Depois, para investigar:
+Parâmetros: o nome da ação, a exceção, dados extra para investigar
+(opcional) e a mensagem para o usuário (opcional; o padrão é
+"A operação falhou.").
+
+O que é gravado:
+
+- **`changes`** — só a mensagem: `{"message": "Não foi possível concluir o pagamento."}`.
+  Pode ser mostrada ao usuário.
+- **`debug_info`** — para o desenvolvedor: classe e mensagem da exceção,
+  arquivo e linha, as primeiras linhas do *stack trace*, os dados extra, a rota
+  e o IP da requisição, e o nome do banco. Numa falha de SQL, a query é
+  guardada **com `?` no lugar dos valores**. Senhas e endereço do banco nunca
+  são gravados.
+
+Para consultar:
 
 ```php
-$falha = Fatura::auditsFor($id)->failures()->latest()->first();
-
-$falha->changes;      // ['message' => 'A operação falhou.', 'error' => '...']
-$falha->debug_info;   // trace, sql, request, ambiente — tudo o que você precisa
+Audit::failures()->latest()->get();
+$audit->isFailure();
 ```
 
-> O `debug_info` traz driver e nome do banco, mas **nunca host ou credenciais**.
-> Detalhes de servidor só aparecem fora de produção.
+> **Cuidado com transações.** Se você registrar a falha **dentro** de um
+> `Audit::transaction()` e relançar o erro, a própria auditoria da falha é
+> desfeita junto com a transação. Registre-a **fora**:
+>
+> ```php
+> try {
+>     Audit::transaction(function () use ($fatura) {
+>         // ...
+>     });
+> } catch (\Throwable $e) {
+>     $fatura->auditFailure('cobranca', $e);   // fora da transação: fica gravada
+>
+>     throw $e;
+> }
+> ```
 
-## Usuário padrão para ações de sistema
-
-Por padrão, quando uma auditoria é registrada, o campo `created_by` guarda o ID do usuário que está logado no momento. Mas **o que acontece quando não tem ninguém logado?**
-
-Exemplos de situações sem usuário logado:
-
-- Comandos do Artisan rodando no terminal (`php artisan db:seed`)
-- Jobs na fila (Redis, SQS, etc.)
-- Agendamentos do Cron (`php artisan schedule:run`)
-- Webhooks recebendo requisições de sistemas externos
-
-Nestes casos, o `created_by` ficaria **vazio (NULL)**. Para resolver isso, o pacote permite definir um **usuário padrão** que será usado como fallback.
-
-### Como configurar
-
-**Passo 1** - No arquivo `.env`, defina o ID do usuário que será usado como padrão:
-
-```dotenv
-# .env
-AUDITABLE_DEFAULT_created_by=1
-
-**Passo 2** - Se preferir, defina diretamente no config/auditable.php:
-
-```php
-// // config/auditable.php
-'default_created_by' => env('AUDITABLE_DEFAULT_created_by', 1),
-
-Mas por padrão o pacote no config ja defini o null para o usuário padrão como fallback.
-
-// config/auditable.php
-'default_created_by' => env('AUDITABLE_DEFAULT_created_by', null), // ID NULL como fallback
+---
 
 ## Multitenancy (opcional)
 
-Se você tem um SaaS, há **dois cenários**. Escolha o seu:
+*Multitenancy* é quando um único sistema atende vários clientes (empresas,
+escolas, lojas), e cada um só pode ver os seus dados. Se o seu sistema não é
+assim, pule esta seção.
 
-### Cenário A — cada tenant tem seu próprio banco
+### Caso A — cada cliente tem o seu próprio banco
 
-Usa `stancl/tenancy`, `spatie/laravel-multitenancy` em modo multi-banco, ou
-similar? **Você não precisa fazer nada.** Quando o seu pacote de tenancy troca a
-conexão, a auditoria vai junto para o banco certo. Isolamento automático.
+Não é preciso configurar nada no pacote. A auditoria de cada cliente vai para
+o banco dele, porque usa a mesma conexão da aplicação. É o caso típico de
+pacotes como `stancl/tenancy` e `spatie/laravel-multitenancy` no modo
+multi-banco.
 
-Se quiser forçar uma conexão específica para a auditoria:
+Só não se esqueça de que a **tabela** de auditoria precisa existir em cada
+banco de cliente: coloque a migration publicada junto das migrations dos
+tenants (no `stancl/tenancy`, a pasta `database/migrations/tenant`).
 
-```php
-// config/auditable.php
-'connection' => 'tenant',
+### Caso B — um banco só, com uma coluna `tenant_id` em cada tabela
+
+**1. Ligue o modo tenant *antes* de rodar a migration** (é ele que cria a
+coluna `tenant_id` na tabela de auditoria):
+
+```dotenv
+AUDITABLE_TENANT_ENABLED=true
 ```
 
-### Cenário B — um banco só, com coluna `tenant_id`
-
-Todos os tenants no mesmo banco, separados por uma coluna? Ative o modo por
-coluna e diga ao pacote **como descobrir o tenant atual**:
+Se a tabela de auditoria já existe, crie uma migration para acrescentar a
+coluna:
 
 ```php
-// config/auditable.php
-'tenant' => [
-    'enabled'  => true,
-    'column'   => 'tenant_id',
-    'resolver' => fn () => auth()->user()?->tenant_id,   // ajuste à sua realidade
-],
+Schema::table('audit_table', function (Blueprint $table) {
+    $table->unsignedBigInteger('tenant_id')->nullable()->index();
+});
 ```
 
-Depois, use o trait `BelongsToTenant` nos models que devem ser isolados:
+**2. Diga ao pacote quem é o tenant atual**, no `boot()` do
+`app/Providers/AppServiceProvider.php`:
+
+```php
+use Gsebastiao\Auditable\Audit;
+
+public function boot(): void
+{
+    Audit::resolveTenantUsing(fn () => auth()->user()?->empresa_id);
+}
+```
+
+O pacote só **pergunta** qual é o tenant; quem decide é a sua aplicação.
+
+**3. Nos seus models com `tenant_id`, acrescente `BelongsToTenant`:**
 
 ```php
 use Gsebastiao\Auditable\Concerns\Auditable;
@@ -729,956 +1001,331 @@ use Gsebastiao\Auditable\Concerns\BelongsToTenant;
 
 class Produto extends Model
 {
-    use Auditable;
-    use BelongsToTenant;   // filtra por tenant e preenche tenant_id sozinho
+    use Auditable, BelongsToTenant;
 }
 ```
 
-A partir daí, cada tenant só enxerga os próprios dados — e a auditoria de um
-tenant nunca vaza para outro.
+Com isso, `Produto::all()` só traz os produtos do tenant atual e
+`Produto::create()` preenche o `tenant_id` sozinho. As auditorias também
+passam a ser gravadas e filtradas por tenant.
 
-> **Regra do pacote:** ele **lê** qual é o tenant atual, nunca **decide**. Quem
-> decide é a sua app ou o seu pacote de tenancy. Por isso o `resolver` é seu.
-
-## Personalização avançada
-
-<details>
-<summary><b>Trocar onde/como a auditoria é gravada</b> (fila, serviço externo…)</summary>
-
-Cada peça do pacote é uma interface com implementação padrão. Para trocar,
-religue no seu `AppServiceProvider`:
-
-| Interface | O que faz | Padrão |
-| ----------- | ----------- | -------- |
-| `AuditRepository` | Persiste a auditoria | Grava via Eloquent |
-| `BatchIdGenerator` | Agrupa operações relacionadas | ULID |
-| `ContextResolver` | Descobre usuário e tenant atuais | `auth()` + seu resolver |
+**Ver todos os tenants** (relatórios internos, tarefas de manutenção):
 
 ```php
-use Gsebastiao\Auditable\Contracts\AuditRepository;
-
-public function register(): void
-{
-    $this->app->bind(AuditRepository::class, MinhaAuditoriaNaFila::class);
-}
+Produto::withoutTenantScope()->get();
+Audit::withoutTenantScope()->get();
 ```
 
-</details>
+**Bom saber**
 
-<details>
-<summary><b>Usar seu próprio model de auditoria</b> (outra tabela, relações extras…)</summary>
+- **Sem tenant identificado** (ex.: um comando no terminal), as consultas
+  **não são filtradas**. Para que não mostrem nada nesse caso, ligue
+  `'strict' => true` em `config/auditable.php` (seção `tenant`).
+- **A coluna tem outro nome?** Mude `'column'` em `config/auditable.php`. Se
+  só um model for diferente, defina nele
+  `public function tenantColumn(): string { return 'empresa_id'; }`.
+- **Não coloque `BelongsToTenant` no model `User`** se o seu resolver usa
+  `auth()->user()`: para descobrir o tenant, o Laravel precisaria carregar o
+  usuário, que por sua vez precisaria do tenant — um ciclo sem fim.
+- Prefere configurar tudo em `config/auditable.php`? Crie uma classe com o
+  método `__invoke()` e indique o nome dela em `'resolver'`:
 
-```php
-use Gsebastiao\Auditable\Models\Audit as BaseAudit;
+  ```php
+  // app/Support/TenantAtual.php
+  namespace App\Support;
 
-class Audit extends BaseAudit
-{
-    // suas relações, scopes, accessors…
-}
-```
+  class TenantAtual
+  {
+      public function __invoke(): ?int
+      {
+          return auth()->user()?->empresa_id;
+      }
+  }
+  ```
 
-```php
-// config/auditable.php
-'model' => App\Models\Audit::class,
-```
+  ```php
+  // config/auditable.php
+  'resolver' => App\Support\TenantAtual::class,
+  ```
 
-</details>
-
-<details>
-<summary><b>Ligar/desligar auditoria globalmente</b> (testes, seeders…)</summary>
-
-```php
-// config/auditable.php
-'enabled' => env('AUDITABLE_ENABLED', true),
-```
-
-```dotenv
-# .env.testing
-AUDITABLE_ENABLED=false
-```
-
-</details>
-
-## Referência rápida
-
-```php
-// No model
-use Gsebastiao\Auditable\Concerns\Auditable;          // torna auditável
-use Gsebastiao\Auditable\Concerns\BelongsToTenant;    // isolamento por tenant (opcional)
-
-// Nas opções (getAuditOptions)
-AuditOptions::defaults()
-    ->resolveMap([...])   // traduz FKs
-    ->except([...])       // ignora campos
-    ->only([...])         // ou: só estes campos
-    ->events([...])       // quais eventos auditar
-    ->onlyDirty()         // só o que mudou
-    ->logEmpty(false);    // pular logs vazios
-
-// Modos de tradução
-ResolveMap::direct(label, table, column);   // FK → tabela
-ResolveMap::join([...]);                    // por tabelas intermediárias
-ResolveMap::alias(label);                   // só renomear
-
-// Registrar (além dos eventos automáticos)
-$model->auditAction('aprovado', [...]);            // ação de domínio nomeada
-$model->auditFailure('op', $exception, [...]);     // falha com debug técnico
-
-// Consultar histórico
-$model->audits;                             // do model já carregado
-Model::auditsFor($id);                      // por id (query builder)
-    ->action('aprovado')                    // filtros encadeáveis:
-    ->byUser($userId)
-    ->failures()
-    ->inBatch($batch);
-
-// Colunas de auditoria numa listagem (DataTable) — sem N+1
-use Gsebastiao\Auditable\Support\AuditColumnJoiner;
-AuditColumnJoiner::apply($query, Model::class);                      // created_/updated_ by/at
-AuditColumnJoiner::apply($query, Model::class, actions: ['deleted']); // p/ grelha de lixeira
-AuditColumnJoiner::apply($query, Model::class, userColumn: 'email');  // "quem" por email
-
-// Restaurar um registro após HARD delete (retrato em debug_info['restore'])
-$audit = Model::auditsFor($id)->action('deleted')->latest()->first();
-$audit->isRestorable();                     // tem retrato de restauro?
-$audit->restore();                          // reconstrói com o id original
-$audit->restore(withId: false);             // reconstrói com id novo
-
-// Operações multi-tabela (um batch costura tudo)
-use Gsebastiao\Auditable\Audit;
-Audit::transaction(fn () => /* várias escritas */);   // transação + batch juntos
-Audit::batch(fn () => /* várias escritas */);         // só o batch, sem transação
-$model->operation()->get();                 // toda a operação, a partir de 1 registro
-Model::operationFor($id)->get();            // idem, só com o id
-$model->batchOf();                          // só o id do batch
-Audit::currentBatch();                      // batch aberto (p/ propagar a filas)
-Audit::useBatch($batchId);                  // reabrir batch (dentro de uma job)
-```
-
-```bash
-# Widget JS opcional (modal de histórico pronto) — veja "Widget JS: um modal
-# de histórico pronto" acima. Publica audit-table.init.js em public/:
-php artisan auditable:publish-js
-php artisan auditable:publish-js --path=outro/caminho   # só nesta execução
-php artisan auditable:publish-js --force                # sobrescreve o já publicado
-```
-
-## Licença
-
-MIT. Use à vontade.
+  Não coloque uma função anônima (`fn () => ...`) direto na config: isso
+  impede o `php artisan config:cache`.
 
 ---
 
-# 🇬🇧 English
-
-## Installation
-
-```bash
-composer require gsebastiao/laravel-auditable
-```
-
-Publish the config and migration, then run the migration:
-
-```bash
-php artisan vendor:publish --tag=auditable-config
-php artisan vendor:publish --tag=auditable-migrations
-php artisan migrate
-```
-
-That's it. Nothing else is required.
-
-## Getting started (2 minutes)
-
-**Step 1 —** Add the `Auditable` trait to any model:
-
-```php
-use Illuminate\Database\Eloquent\Model;
-use Gsebastiao\Auditable\Concerns\Auditable;
-
-class Product extends Model
-{
-    use Auditable;
-}
-```
-
-**That's all you need to start.** From now on, `create`, `update` and `delete`
-on this model are audited automatically:
-
-```php
-$product = Product::create(['name' => 'Coffee', 'price' => 20]);
-$product->update(['price' => 25]);
-```
-
-**Step 2 —** Read the history whenever you want:
-
-```php
-$product->audits;   // collection with the full history of the record
-```
-
-Each entry carries the event (`created`/`updated`/`deleted`), what changed, who
-did it, and when. No further setup.
-
-## Turning IDs into names (the whole point)
-
-If your model has foreign keys, tell Auditable how to turn them into readable
-text. You do that by adding **one method** to the model:
-
-```php
-use Gsebastiao\Auditable\Support\AuditOptions;
-use Gsebastiao\Auditable\Support\ResolveMap;
-
-class Product extends Model
-{
-    use Auditable;
-
-    public function getAuditOptions(): AuditOptions
-    {
-        return AuditOptions::defaults()->resolveMap([
-
-            // status_id: look up the name in the "statuses" table
-            'status_id' => ResolveMap::direct(
-                label:  'Status',     // how it shows in the log
-                table:  'statuses',   // where to look
-                column: 'name',       // which column is the text
-            ),
-
-        ]);
-    }
-}
-```
-
-Now, instead of `status_id: 2 → 5`, the log records `Status: "Active" → "Blocked"`.
-
-### The three translation modes
-
-| Mode | When to use | Example |
-| ------ | ------------- | --------- |
-| `direct` | The FK points straight to a table with the name | `status_id` → `statuses` table |
-| `join` | You need to walk through intermediate tables | `state_id` → `states` → `countries` |
-| `alias` | Not an FK, you just want to rename the field | `active` → "Status" |
-
-<details>
-<summary><b>See <code>join</code> and <code>alias</code> examples</b></summary>
-
-```php
-AuditOptions::defaults()->resolveMap([
-
-    // JOIN: resolve the country name from state_id,
-    // walking states → countries
-    'state_id' => ResolveMap::join([
-        ['table' => 'states', 'key' => 'id'],
-        ['table' => 'countries',
-         'on'     => ['countries.id', '=', 'states.country_id'],
-         'column' => 'name',
-         'label'  => 'Country'],
-    ]),
-
-    // ALIAS: a boolean field that just needs a nice label in the log
-    'active' => ResolveMap::alias('Status'),
-
-]);
-```
-
-</details>
-
-## Choosing what to audit
-
-The same `getAuditOptions()` controls the rest. Everything is optional:
-
-```php
-AuditOptions::defaults()
-    ->except(['updated_at', 'secret'])   // never audit these fields
-    ->only(['price', 'status_id'])       // OR: audit only these
-    ->events(['updated', 'deleted'])     // skip "created"
-    ->onlyDirty()                        // only record what actually changed (default)
-    ->logEmpty(false);                   // don't record if nothing changed (default)
-```
-
-> Passwords and tokens (`password`, `remember_token`) are ignored by default.
-
-## Multi-table operations: one batch, one story
-
-This is the scenario that ties everything together. You create an order — and
-along with it come the customer, the line items, a stock decrement. These are
-**writes across different tables**, but they're part of the **same operation**.
-You want to look at any one of them later and reconstruct the whole thing.
-
-Wrap the operation in `Audit::transaction()` (or `Audit::batch()` if you don't
-want a transaction). Everything audited inside — from any model — gets the
-**same batch**:
+## Desligar a auditoria
 
 ```php
 use Gsebastiao\Auditable\Audit;
 
-Audit::transaction(function () use ($data) {
-    $customer = Customer::create($data['customer']);
-    $order    = Order::create(['customer_id' => $customer->id, ...]);
-
-    foreach ($data['items'] as $item) {
-        Item::create(['order_id' => $order->id, ...]);
-    }
+// Só um trecho de código (seeders, importações, correções em massa)
+Audit::withoutAuditing(function () {
+    Produto::factory()->count(500)->create();
 });
 ```
 
-The customer, the order and all items are recorded under a single batch. And
-because it's a transaction, **if any part fails, everything rolls back** — writes
-and audit trail together.
-
-### Recovering the whole operation from a single record
-
-Now the part you described: you have **just the customer** and want to see
-everything that came in with it. Call `operation()`:
-
-```php
-$customer = Customer::find($id);
-
-$customer->operation()->get();
-// -> returns the audits for the customer, the order AND the items
-//    (everything that shared the batch)
+```dotenv
+# No sistema inteiro — por exemplo, no .env.testing
+AUDITABLE_ENABLED=false
 ```
 
-Or, if you only have the id:
+Para um model específico, deixe a lista de eventos vazia:
+`AuditOptions::defaults()->events([])`.
 
-```php
-Customer::operationFor($id)->get();
-```
+---
 
-Since the result is a normal query builder, group by table to display it:
+## Configuração completa
 
-```php
-$customer->operation()->get()->groupBy('subject_type');
-// [
-//   'App\Models\Customer' => [ ... ],
-//   'App\Models\Order'    => [ ... ],
-//   'App\Models\Item'     => [ ... ],
-// ]
-```
+Todas as opções de `config/auditable.php`. Os padrões funcionam; mude só o
+que precisar.
 
-> **Just need the batch id?** `$customer->batchOf()` returns the identifier of
-> that record's latest operation — handy for logs or passing along.
-
-### Propagating the batch to queues
-
-If part of the operation runs in an async job and you want it in the same batch,
-pass the id to the job and reopen it there:
-
-```php
-// When dispatching:
-ProcessOrder::dispatch($order, Audit::currentBatch());
-
-// Inside the job:
-public function handle(): void
-{
-    Audit::useBatch($this->batchId);
-    // everything audited here joins the original operation's batch
-}
-```
-
-## Custom actions (beyond create/update/delete)
-
-The three automatic events cover database writes. But not everything you want to
-audit is a write — "approved the order", "resent the email", "logged in",
-"exported". For those, call `auditAction()` with whatever name you want:
-
-```php
-$order->auditAction('approved');
-
-$order->auditAction('email_resent', [
-    'to'  => $customer->email,
-    'via' => 'ses',
-]);
-```
-
-It lands in the same history as the automatic events, under the name you gave.
-
-## Querying a specific record's history
-
-`$product->audits` gives you the history of a model you **already loaded**. When
-you only have the **id**, or want to **filter**, use `auditsFor()` — it returns a
-query builder:
-
-```php
-// Everything for record 42, without loading the Product
-Product::auditsFor(42)->get();
-
-// Only approvals
-Product::auditsFor(42)->action('approved')->get();
-
-// The last change made by a user
-Product::auditsFor(42)->byUser($userId)->latest()->first();
-
-// Only failures for this record
-Product::auditsFor(42)->failures()->get();
-```
-
-Available filters: `action()`, `byUser()`, `failures()`, `inBatch()`.
-
-## Audit columns in a listing (DataTable)
-
-The relations above answer "what is **this** record's history?". A **grid** asks a
-different question about **many** records at once: "for each row on this page, who
-created it and when? who last changed it and when?". Answering that with the
-relation would be an **N+1** — one audit query per displayed row.
-
-`AuditColumnJoiner` solves it differently: it attaches `audit_created_by`,
-`audit_created_at`, `audit_updated_by`, `audit_updated_at` as **columns** on the
-query itself, via `LEFT JOIN`s of aggregated subqueries. One query, no N+1, ready
-for the DataTable to sort and paginate.
-
-```php
-use Gsebastiao\Auditable\Support\AuditColumnJoiner;
-
-// On your listing query:
-$query = Product::query()->where('active', 1);
-
-AuditColumnJoiner::apply($query, Product::class);
-// each row now carries: audit_created_by, audit_created_at, audit_updated_by, audit_updated_at
-```
-
-**Why the `audit_` prefix?** Because `created_at`, `updated_at` and `deleted_at` are
-**native** Eloquent columns with automatic datetime casting. If we emitted a column
-named `created_at`, it would collide with the table's native one and Eloquent would
-try to cast the already-formatted string (`2026-07-10 14:30`) — and break. Prefixing
-**every** column at the root removes the collision entirely and, as a bonus, keeps
-the `_by`/`_at` pair consistent across all actions — no exceptions, no special
-suffixes. Every action comes out the same: `audit_restored_by`/`audit_restored_at`,
-`audit_approved_by`/`audit_approved_at`. The prefix is configurable (`prefix:` param
-or `config('auditable.column_prefix')`).
-
-**Why only `created` and `updated` by default?** In a normal grid of a model with
-`SoftDeletes`, the global scope already hides deleted rows — so an `audit_deleted_by`
-column would always be empty, costing two `JOIN`s per row for nothing. Only include
-`deleted`/`restored` when the **grid itself** is a trash bin:
-
-```php
-// Trash-bin grid: here "who deleted / when" makes sense
-AuditColumnJoiner::apply(
-    Product::onlyTrashed(),
-    Product::class,
-    actions: ['deleted', 'restored'],
-);
-
-// Show by email instead of name
-AuditColumnJoiner::apply($query, Product::class, userColumn: 'email');
-
-// Domain actions become columns too (the latest occurrence)
-AuditColumnJoiner::apply($query, Product::class, actions: ['created', 'approved']);
-// → audit_approved_by, audit_approved_at
-```
-
-Each action = **two** `LEFT JOIN`s (the audit subquery + the `users` table). Ask
-only for what the grid will show. Recommended index on the audit table:
-`(subject_type, event, subject_id, id)`.
-
-> **Which to use:** MANY rows, one summary per row → `AuditColumnJoiner`. ONE row,
-> the whole history → `$model->audits` / `auditsFor()`.
-
-## JS widget: a ready-made history modal (100% OPTIONAL)
-
-> **This is entirely optional.** Everything you've read so far — recording
-> audits, querying `$model->audits`, building columns with `AuditColumnJoiner`
-> — works 100% without anything below. This section exists only for people who
-> don't want to write HTML/CSS/JS from scratch to show that history on a
-> screen. If you'd rather build your own interface (or already have one), you
-> can skip this entire section without losing any of the package's
-> functionality.
-
-### What it is
-
-A single JavaScript file (`audit-table.init.js`) that opens a **modal**
-(popup) showing a record's history when you click some button on your page.
-It:
-
-- **Has zero dependencies.** No jQuery, no Bootstrap, no DataTables. Just one
-  `<script>` tag — the modal's HTML, CSS, and behavior (search, filter,
-  pagination) are all generated by the file itself, in real time, when you
-  open the modal.
-- **Never clashes with your site's look.** All injected CSS uses exclusive
-  class names, always prefixed with `ga-audit-` (e.g. `ga-audit-modal`,
-  `ga-audit-table`). It never uses generic names like `.modal` or `.table` —
-  exactly the names frameworks like Bootstrap or AdminLTE already use — so
-  there's no risk of your template's CSS leaking into the modal, or the
-  other way around.
-- **Works on any screen size.** On mobile, the modal takes up the whole
-  screen (easier to use with a finger); on larger screens, it shows up
-  centered like a regular popup.
-
-### The two modals
-
-The file registers a global object called `GaAudit`, with **two independent
-widgets**. Use one, the other, or both — they're built for different
-audiences:
-
-| Widget | For whom | What it shows |
+| Opção | Padrão | O que faz |
 | --- | --- | --- |
-| `GaAudit.full` | Auditors/admins with elevated permissions | Full history: search, filter by action, pagination, changes grouped by batch |
-| `GaAudit.simple` | Any regular user | A short, direct list: what, who, when — no filters |
+| `enabled` | `true` (`AUDITABLE_ENABLED`) | Liga/desliga a auditoria no sistema inteiro |
+| `table` | `audit_table` | Nome da tabela de auditoria (mude antes da migration) |
+| `connection` | `null` (`AUDITABLE_CONNECTION`) | Conexão de banco da auditoria; `null` = a da aplicação |
+| `model` | `Gsebastiao\Auditable\Models\Audit` | Model da tabela de auditoria ([estender](#o-seu-próprio-model-de-auditoria)) |
+| `auth_guard` | `null` | Guard de onde vem o usuário logado; `null` = o padrão |
+| `default_created_by` | `null` (`AUDITABLE_DEFAULT_CREATED_BY`) | Usuário gravado quando ninguém está logado |
+| `user_model` | `null` | Model dos usuários para `$audit->user`; `null` = o do `config/auth.php` |
+| `users_table` | `users` | Tabela de usuários usada pelo `AuditColumnJoiner` |
+| `column_prefix` | `audit_` | Prefixo das colunas do `AuditColumnJoiner` |
+| `tenant.enabled` | `false` (`AUDITABLE_TENANT_ENABLED`) | Liga o [multitenancy por coluna](#multitenancy-opcional) |
+| `tenant.column` | `tenant_id` | Nome da coluna de tenant |
+| `tenant.resolver` | `null` | Classe invocável que devolve o tenant atual |
+| `tenant.strict` | `false` | Sem tenant identificado: `false` vê tudo, `true` não vê nada |
+| `js.publish_path` | `assets/js` | Pasta (dentro de `public/`) do widget JS |
+| `debug.include_database` | `true` (`AUDITABLE_DEBUG_DB`) | Grava conexão, driver e nome do banco nas falhas |
 
-### Step 1 — Publish the file
+**Guardar a auditoria noutro banco.** Crie a conexão em `config/database.php`
+e indique-a no `.env` **antes** de rodar a migration:
 
-The file already ships inside the package (at
-`vendor/gsebastiao/laravel-auditable/src/plugin/audit-table.init.js`), but the
-browser can only reach files that live inside your Laravel project's
-`public/` folder. That's what this command is for — it **copies** the file
-there:
-
-```
-php artisan auditable:publish-js
-```
-
-By default, this creates the file at `public/assets/js/audit-table.init.js`.
-
-**Want to publish somewhere else?** Two ways:
-
-```
-# Just for this one run (doesn't change anything permanently):
-php artisan auditable:publish-js --path=js/vendor/audit
-
-# Permanently, by editing the published config (config/auditable.php):
-'js' => [
-    'publish_path' => 'js/vendor/audit',
-],
+```dotenv
+AUDITABLE_CONNECTION=auditoria
 ```
 
-**Updating the package and want the latest version of the JS file?** Run it
-again with `--force` to overwrite what's already published:
+Nesse caso, `Audit::transaction()` desfaz os dois bancos juntos em caso de
+erro, mas o `AuditColumnJoiner` deixa de funcionar (ele precisa do mesmo
+banco).
 
-```
-php artisan auditable:publish-js --force
-```
+---
 
-> **Alternative:** if your project already uses a bundler (Vite, Mix,
-> Webpack…) and you'd rather have `audit-table.init.js` go through the SAME
-> build pipeline as the rest of your JS, skip the command above and just copy
-> the file from `vendor/gsebastiao/laravel-auditable/src/plugin/` into your
-> assets folder (e.g. `resources/js/vendor/`), then import it normally.
+## Personalização avançada
 
-### Step 2 — Include it on the page
+Nada disto é necessário para o uso normal.
 
-In your Blade layout (e.g. `resources/views/layouts/app.blade.php`), right
-before `</body>`:
+### O seu próprio model de auditoria
 
-```
-<script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
-```
-
-(Swap `assets/js` for whatever path you chose in Step 1, if you changed the
-default.)
-
-### Step 3 — Create the route that feeds the modal
-
-The JS widget **knows nothing about your database** — it only knows how to
-make a `POST` request to a URL you give it, and expects a JSON response back
-in a specific shape. A regular Laravel route builds that response, calling
-the same package methods you've already seen throughout this README.
-
-**For the `GaAudit.full` modal** (full history, grouped by batch):
-
-```
-// routes/web.php
-use App\Models\Product;
-use Illuminate\Http\Request;
-
-Route::post('/audit/readGrouped', function (Request $request) {
-    $groups = Product::operationFor($request->input('id'))
-        ->get()
-        ->groupBy('batch')
-        ->map(fn ($actions, $batchId) => [
-            'batch_id' => $batchId,
-            'actions' => $actions->map(fn ($audit) => [
-                'action' => $audit->event,
-                'created_by' => User::find($audit->created_by, ['name'])->name,
-                'type' => $audit->is_failure ? 'failed' : 'success',
-                'created_at' => $audit->created_at->format('Y-m-d H:i'),
-                'changes' => $audit->changes,
-            ]),
-        ])
-        ->values();
-
-    return response()->json([
-        'record_id' => $request->input('id'),
-        'groups' => $groups,
-    ]);
-})->middleware('auth'); // protect with auditor-level permissions
-```
-
-**For the `GaAudit.simple` modal** (short list, no grouping):
-
-```
-// routes/web.php
-use App\Models\Product;
-use Illuminate\Http\Request;
-
-Route::post('/audit/read', function (Request $request) {
-    $audits = Product::auditsFor($request->input('id'))
-        ->latest()
-        ->limit(50)
-        ->get()
-        ->map(fn ($audit) => [
-            'action' => $audit->event,
-            'created_by' => User::find($audit->created_by, ['name'])->name,
-            'created_at' => $audit->created_at->format('Y-m-d H:i'),
-        ]);
-
-    return response()->json(['audits' => $audits]);
-})->middleware('auth');
-```
-
-> The route names above (`/audit/readGrouped`, `/audit/read`) are just
-> suggestions — use whatever names and middleware make sense for your
-> project. What matters is the **JSON response shape**, not the URL itself.
-> Feel free to use a regular Controller instead of a route Closure.
-
-### Step 4 — Open the modal
-
-Two ways, your choice:
-
-**Option A — `data-*` attributes (no JS to write at all):**
-
-```
-<button
-    data-ga-audit="full"
-    data-ga-audit-id="{{ $product->id }}"
-    data-ga-audit-url="/audit/readGrouped">
-    View full history
-</button>
-
-<button
-    data-ga-audit="simple"
-    data-ga-audit-id="{{ $product->id }}"
-    data-ga-audit-url="/audit/read">
-    View history
-</button>
-```
-
-The widget already listens for clicks on any element carrying
-`data-ga-audit` on the page — nothing to register manually.
-
-**Option B — calling it from JavaScript (more control):**
-
-```
-document.getElementById('myButton').addEventListener('click', function () {
-    GaAudit.full.open({
-        endpoint: '/audit/readGrouped',
-        id: 42,
-        title: 'History for Product #42', // optional
-    });
-});
-```
-
-> `title` is optional in both forms. Without it, `GaAudit.full` defaults to
-> "Histórico de Auditoria" and `GaAudit.simple` defaults to "Auditoria do
-> Registro" — pass `title` (or `data-ga-audit-title` in Option A) only when
-> you want different text.
-
-### The modal needs no HTML on the page
-
-Unlike a traditional Bootstrap modal, you do **not** need to leave a hidden
-`<div id="someModal">...</div>` somewhere in your layout. The widget builds
-the modal's entire HTML in memory when you open it, and removes it
-completely when you close it. That's what "integrating the modal into the
-plugin" means in practice: zero external HTML, zero layout setup, works on
-any page where the `<script>` tag is included.
-
-### Customizing colors and icons
-
-The look uses CSS variables, so you can tweak accent color, border radius,
-etc. without touching the package file at all — just override them in your
-own site's CSS:
-
-```
-:root {
-    --ga-audit-accent: #7c3aed;   /* accent color (buttons, focus ring, pagination) */
-    --ga-audit-radius: 4px;       /* modal corners */
-}
-```
-
-Icons (search magnifier, pagination arrows, close "x") are simple Unicode
-characters by default — lightweight, with no dependency on any external icon
-font. If you'd rather use SVGs or another icon set, override them before
-opening the first modal:
-
-```
-<script src="{{ asset('assets/js/audit-table.init.js') }}"></script>
-<script>
-    GaAudit.icons.close = '<svg width="14" height="14">...</svg>';
-</script>
-```
-
-### A note on the UI language
-
-The interface's fixed text (labels like "Ação:", "Linhas:", "Buscar:",
-column headers, messages like "Carregando…" or "Nenhum resultado
-encontrado") is in Portuguese, hardcoded in the file. Only the modal's
-`title` is customizable today (see Step 4 above). If your project needs
-these strings in another language, for now the way to do it is to edit the
-published file directly — it's plain JavaScript, no build step involved.
-Making these strings configurable is something that may land in a future
-version of the package.
-
-## Surviving a hard delete: the restore snapshot
-
-The audit table is **append-only and immutable** — by design, it does **not** use
-soft delete. An audit record that can be deleted stops being useful for auditing who
-deletes things. What needs protecting is the **business data**, and that protection
-is separate.
-
-On the `deleted` event, besides the readable `changes`, the package writes a **full
-raw snapshot** of the record into `debug_info['restore']` — every field and value,
-ignoring the `only()`/`except()` restrictions of the readable log. That snapshot is
-what lets you rebuild the row even after a **hard delete** (no `SoftDeletes`), where
-the row truly disappears from the source table.
+Para acrescentar relações ou métodos às auditorias:
 
 ```php
-// Someone hard-deleted a Product. The row is gone — but the audit kept it.
-$audit = Product::auditsFor($id)->action('deleted')->latest()->first();
+namespace App\Models;
 
-$audit->isRestorable();   // true, if the snapshot was written
-$product = $audit->restore();   // the row COMES BACK, with its original id
-```
+use Gsebastiao\Auditable\Models\Audit as BaseAudit;
 
-The snapshot is raw (values and FKs as they were), so the record returns
-**identical**, id included. Two important guarantees:
-
-- **Secrets don't come back.** Fields in `neverSnapshot` (by default `password`,
-  `remember_token`) **never** enter the snapshot — not even to restore. They return
-  null; handle them in your flow if needed.
-- **`changes` stays readable.** The restore snapshot is technical and goes to
-  `debug_info` (dev-facing). The delete's `changes` remains the readable snapshot,
-  for humans. One concern for reading, another for rebuilding — kept apart.
-
-```php
-// Restore letting the DB assign a fresh id (avoids conflict if the id was reused)
-$product = $audit->restore(withId: false);
-```
-
-On by default. If a model has bulky fields you don't want duplicated into the audit,
-turn it off per model:
-
-```php
-public function getAuditOptions(): AuditOptions
+class Auditoria extends BaseAudit
 {
-    return AuditOptions::defaults()->fullSnapshotOnDelete(false);
+    // opcional: outra tabela (senão usa config('auditable.table'))
+    // protected $table = 'historico';
 }
 ```
 
-Or globally, in `config/auditable.php`, under the `restore` block.
-
-## Auditing failures (the debug only the dev sees)
-
-When an operation can fail and you want to record **why**, use `auditFailure()`
-inside the `catch`. It separates two things:
-
-- **`changes`** — a friendly message, which the user can see.
-- **`debug_info`** — stack trace, SQL, request, environment. Developer only.
-
-```php
-try {
-    $invoice->update($data);
-} catch (\Throwable $e) {
-    $invoice->auditFailure('invoice_update', $e, [
-        'payload' => $data,   // extra context that helps you investigate
-    ]);
-
-    throw $e;   // rethrow — auditing doesn't swallow the error
-}
-```
-
-Then, to investigate:
-
-```php
-$failure = Invoice::auditsFor($id)->failures()->latest()->first();
-
-$failure->changes;      // ['message' => 'The operation failed.', 'error' => '...']
-$failure->debug_info;   // trace, sql, request, environment — everything you need
-```
-
-> `debug_info` includes the driver and database name, but **never host or
-> credentials**. Server details only show outside production.
-
-## Default user for system actions
-
-When an audit is triggered by a console command, a queued job, a seeder, or any
-other context without an authenticated user, `created_by` would stay empty. For
-these cases, you can set a **default user** that will be used as a fallback:
-
 ```php
 // config/auditable.php
-'default_created_by' => env('AUDITABLE_DEFAULT_created_by', null),
-
-## Multitenancy (optional)
-
-If you run a SaaS, there are **two scenarios**. Pick yours:
-
-### Scenario A — each tenant has its own database
-
-Using `stancl/tenancy`, `spatie/laravel-multitenancy` in multi-database mode, or
-similar? **You don't need to do anything.** When your tenancy package switches the
-connection, auditing follows to the right database. Isolation is automatic.
-
-To force a specific connection for auditing:
-
-```php
-// config/auditable.php
-'connection' => 'tenant',
+'model' => App\Models\Auditoria::class,
 ```
 
-### Scenario B — one database, with a `tenant_id` column
+> Dentro da sua classe, leia a coluna com `$this->getAttribute('changes')`:
+> `$this->changes` é uma propriedade interna do Eloquent com o mesmo nome.
 
-All tenants in the same database, separated by a column? Enable column mode and
-tell the package **how to find the current tenant**:
+### Gravar em outro lugar (fila, serviço externo)
 
-```php
-// config/auditable.php
-'tenant' => [
-    'enabled'  => true,
-    'column'   => 'tenant_id',
-    'resolver' => fn () => auth()->user()?->tenant_id,   // adjust to your setup
-],
-```
-
-Then use the `BelongsToTenant` trait on the models that must be isolated:
-
-```php
-use Gsebastiao\Auditable\Concerns\Auditable;
-use Gsebastiao\Auditable\Concerns\BelongsToTenant;
-
-class Product extends Model
-{
-    use Auditable;
-    use BelongsToTenant;   // filters by tenant and fills tenant_id on its own
-}
-```
-
-From then on, each tenant only sees its own data — and one tenant's audit trail
-never leaks into another's.
-
-> **Package rule:** it **reads** which tenant is current, it never **decides**.
-> Your app or your tenancy package decides. That's why the `resolver` is yours.
-
-## Advanced customization
-
-<details>
-<summary><b>Change where/how audits are stored</b> (queue, external service…)</summary>
-
-Every piece of the package is an interface with a default implementation. To
-swap one, rebind it in your `AppServiceProvider`:
-
-| Interface | What it does | Default |
-| ----------- | -------------- | --------- |
-| `AuditRepository` | Persists the audit entry | Writes via Eloquent |
-| `BatchIdGenerator` | Groups related operations | ULID |
-| `ContextResolver` | Finds current user and tenant | `auth()` + your resolver |
+Implemente `Gsebastiao\Auditable\Contracts\AuditRepository` (métodos
+`persist`, `replace` e `forget` — a documentação de cada um está na
+interface) e registre no `AppServiceProvider`:
 
 ```php
 use Gsebastiao\Auditable\Contracts\AuditRepository;
 
-public function register(): void
-{
-    $this->app->bind(AuditRepository::class, MyQueuedAudit::class);
-}
+$this->app->bind(AuditRepository::class, \App\Auditoria\GravarNaFila::class);
 ```
 
-</details>
+Se o destino não tiver ids, `persist()` pode devolver `null`; nesse caso,
+`audit()` passa a criar sempre uma linha nova.
 
-<details>
-<summary><b>Use your own audit model</b> (other table, extra relations…)</summary>
+### Outras peças substituíveis
+
+| Interface | Responsável por | Padrão |
+| --- | --- | --- |
+| `Contracts\ContextResolver` | Descobrir o usuário e o tenant atuais | Lê o `auth()` e o resolver de tenant |
+| `Contracts\BatchIdGenerator` | Gerar o id das operações | ULID (26 caracteres) |
+
+Troque do mesmo jeito: `$this->app->bind(Interface::class, SuaClasse::class);`.
+
+---
+
+## Problemas comuns
+
+### Não foi gravada nenhuma auditoria
+
+Confira, nesta ordem:
+
+1. O model tem `use Auditable;`?
+2. A gravação passa pelo Eloquent? Updates e deletes **em massa**, `DB::table()`,
+   `insert()`, `upsert()` e `saveQuietly()` não geram auditoria (veja
+   [o que é auditado](#o-que-é-e-o-que-não-é-auditado-automaticamente)).
+3. Algum valor mudou de verdade? Um `update()` com os mesmos valores não grava
+   nada — o Laravel nem chega a salvar. E se só mudaram campos ignorados
+   (`updated_at` ou os de `except()`), não sobra nada para registrar: use
+   `logEmpty()` para gravar mesmo assim.
+4. O evento está em `events()`? E a auditoria não está desligada
+   (`AUDITABLE_ENABLED`, `Audit::withoutAuditing()`)?
+5. A gravação aconteceu dentro de uma transação que foi desfeita?
+6. Usa `php artisan config:cache`? Depois de mudar o `.env`, rode-o de novo.
+
+### `created_by` está vazio
+
+Ninguém estava logado (terminal, fila, agendamento). Defina
+`AUDITABLE_DEFAULT_CREATED_BY` ou use `audit(createdBy: ...)`. Veja
+[Quem fez a alteração](#quem-fez-a-alteração).
+
+### O modal mostra "Não foi possível carregar"
+
+- Erro **419**: falta a tag `<meta name="csrf-token">` no layout.
+- Erro **404**: a URL em `data-ga-audit-url` não bate com a rota (confira com
+  `php artisan route:list`).
+- Erro **401/403**: a rota exige login ou permissão.
+- Erro **500**: veja `storage/logs/laravel.log`.
+
+Na aba **Rede** (Network) das ferramentas do navegador (F12) aparece o código
+de erro do pedido.
+
+### Meus ids são UUID ou ULID
+
+Antes de rodar `php artisan migrate`, abra a migration publicada e ajuste as
+três linhas do topo:
 
 ```php
-use Gsebastiao\Auditable\Models\Audit as BaseAudit;
-
-class Audit extends BaseAudit
-{
-    // your relations, scopes, accessors…
-}
+private string $subjectKeyType = 'uuid';   // ids dos seus models
+private string $userKeyType = 'integer';   // ids dos usuários
+private string $tenantKeyType = 'integer'; // ids dos tenants (se usar)
 ```
+
+Valores aceitos: `'integer'`, `'uuid'`, `'ulid'` e `'string'`. Se a tabela já
+existe, faça uma migration que altere as colunas `subject_id`, `created_by`
+(e `tenant_id`).
+
+### Aparece `********` no lugar de um valor
+
+O campo usa o cast `encrypted`. É de propósito: o valor nunca vai para a
+auditoria em texto claro.
+
+### O `label` do `resolveMap` vem `null`
+
+Não foi encontrada a linha procurada: confira o nome da tabela e da coluna no
+`ResolveMap::direct()` e se o registro ainda existe.
+
+### Erro ao usar `php artisan config:cache`
+
+Há uma função anônima (`fn () => ...`) em `config/auditable.php`. Troque por
+uma classe ou use `Audit::resolveTenantUsing()` (veja [Multitenancy](#multitenancy-opcional)).
+
+---
+
+## Referência rápida
+
+Um resumo de tudo, para consulta (não é um arquivo para copiar inteiro):
 
 ```php
-// config/auditable.php
-'model' => App\Models\Audit::class,
-```
-
-</details>
-
-<details>
-<summary><b>Toggle auditing globally</b> (tests, seeders…)</summary>
-
-```php
-// config/auditable.php
-'enabled' => env('AUDITABLE_ENABLED', true),
-```
-
-```dotenv
-# .env.testing
-AUDITABLE_ENABLED=false
-```
-
-</details>
-
-## Quick reference
-
-```php
-// On the model
-use Gsebastiao\Auditable\Concerns\Auditable;          // makes it auditable
-use Gsebastiao\Auditable\Concerns\BelongsToTenant;    // per-tenant isolation (optional)
-
-// In the options (getAuditOptions)
-AuditOptions::defaults()
-    ->resolveMap([...])   // translate FKs
-    ->except([...])       // ignore fields
-    ->only([...])         // or: only these fields
-    ->events([...])       // which events to audit
-    ->onlyDirty()         // only what changed
-    ->logEmpty(false);    // skip empty logs
-
-// Translation modes
-ResolveMap::direct(label, table, column);   // FK → table
-ResolveMap::join([...]);                    // through intermediate tables
-ResolveMap::alias(label);                   // just rename
-
-// Record (beyond the automatic events)
-$model->auditAction('approved', [...]);            // named domain action
-$model->auditFailure('op', $exception, [...]);     // failure with tech debug
-
-// Read history
-$model->audits;                             // of the already-loaded model
-Model::auditsFor($id);                      // by id (query builder)
-    ->action('approved')                    // chainable filters:
-    ->byUser($userId)
-    ->failures()
-    ->inBatch($batch);
-
-// Audit columns in a listing (DataTable) — no N+1
-use Gsebastiao\Auditable\Support\AuditColumnJoiner;
-AuditColumnJoiner::apply($query, Model::class);                      // created_/updated_ by/at
-AuditColumnJoiner::apply($query, Model::class, actions: ['deleted']); // for a trash-bin grid
-AuditColumnJoiner::apply($query, Model::class, userColumn: 'email');  // "who" by email
-
-// Restore a record after a HARD delete (snapshot in debug_info['restore'])
-$audit = Model::auditsFor($id)->action('deleted')->latest()->first();
-$audit->isRestorable();                     // has a restore snapshot?
-$audit->restore();                          // rebuild with the original id
-$audit->restore(withId: false);             // rebuild with a fresh id
-
-// Multi-table operations (one batch ties it all)
 use Gsebastiao\Auditable\Audit;
-Audit::transaction(fn () => /* several writes */);   // transaction + batch together
-Audit::batch(fn () => /* several writes */);         // batch only, no transaction
-$model->operation()->get();                 // the whole operation, from 1 record
-Model::operationFor($id)->get();            // same, with just the id
-$model->batchOf();                          // just the batch id
-Audit::currentBatch();                      // open batch (to propagate to queues)
-Audit::useBatch($batchId);                  // reopen batch (inside a job)
+use Gsebastiao\Auditable\Concerns\Auditable;
+use Gsebastiao\Auditable\Concerns\BelongsToTenant;
+use Gsebastiao\Auditable\Support\AuditColumnJoiner;
+use Gsebastiao\Auditable\Support\AuditOptions;
+use Gsebastiao\Auditable\Support\AuditWidget;
+use Gsebastiao\Auditable\Support\ResolveMap;
+
+// ── No model ──────────────────────────────────────────────────────────
+use Auditable;                                  // auditoria automática
+use BelongsToTenant;                            // (opcional) filtro por tenant
+
+public function getAuditOptions(): AuditOptions
+{
+    return AuditOptions::defaults()
+        ->events(['created', 'updated', 'deleted'])
+        ->only([...])  ->except([...])  ->neverSnapshot([...])
+        ->onlyDirty()  ->logEmpty()  ->logTimestamps()  ->fullSnapshotOnDelete()
+        ->resolveMap([
+            'status_id' => ResolveMap::direct('Status', 'status', 'nome'),
+            'estado_id' => ResolveMap::join([...]),
+            'preco'     => ResolveMap::alias('Preço'),
+        ]);
+}
+
+// ── Registrar ─────────────────────────────────────────────────────────
+$model->auditAction('aprovado', ['motivo' => '...']);           // linha nova
+$model->auditFailure('cobranca', $e, ['extra' => 1], 'Mensagem'); // falha
+$model->audit(event: 'importado', createdBy: 5);                 // ajusta a entrada automática
+Audit::for('pessoa', $id, 'updated')->changes([...])->save();   // sem model
+
+// ── Operações ─────────────────────────────────────────────────────────
+Audit::transaction(fn () => ...);      // transação + mesmo batch
+Audit::batch(fn () => ...);            // só o mesmo batch
+Audit::currentBatch();                 // batch atual (ou null)
+Audit::useBatch($batch, fn () => ...); // continuar um batch (filas)
+Audit::withoutAuditing(fn () => ...);  // não auditar este trecho
+
+// ── Consultar ─────────────────────────────────────────────────────────
+$model->audits();         Model::auditsFor($id);      // linhas do registro
+$model->operation();      Model::operationFor($id);   // última operação
+$model->operations();     Model::operationsFor($id);  // todas as operações
+$model->batchOf();                                    // id da última operação
+
+Audit::action('updated')  Audit::byUser($id)  Audit::inBatch($b)
+Audit::failures()         Audit::forRecord(Model::class, $id)  Audit::withoutTenantScope()
+
+$audit->user   $audit->subject   $audit->changes   $audit->changeLines()
+$audit->isFailure()   $audit->isRestorable()   $audit->restore()
+
+// ── Telas ─────────────────────────────────────────────────────────────
+AuditColumnJoiner::apply($query, Model::class);           // colunas numa listagem
+AuditWidget::full(Model::operationsFor($id), recordId: $id); // JSON do GaAudit.full
+AuditWidget::simple(Model::auditsFor($id));                  // JSON do GaAudit.simple
+
+// ── Multitenancy ──────────────────────────────────────────────────────
+Audit::resolveTenantUsing(fn () => auth()->user()?->empresa_id);
+Model::withoutTenantScope();
 ```
 
 ```bash
-# Optional JS widget (ready-made history modal) — see "JS widget: a
-# ready-made history modal" above. Publishes audit-table.init.js to public/:
-php artisan auditable:publish-js
-php artisan auditable:publish-js --path=some/other/path   # this run only
-php artisan auditable:publish-js --force                  # overwrite what's published
+php artisan vendor:publish --tag=auditable-config       # config/auditable.php
 ```
 
-## License
+```bash
+php artisan vendor:publish --tag=auditable-migrations   # migration da tabela
+```
 
-MIT. Use it freely.
+```bash
+php artisan auditable:publish-js [--path=...] [--force] # widget JS em public/
+```
+
+---
+
+## Testes do pacote
+
+```bash
+composer install
+```
+
+```bash
+composer test
+```
+
+## Atualizando de uma versão anterior
+
+Veja o [CHANGELOG](CHANGELOG.md): ele lista o que mudou e o que ajustar no
+seu código.
+
+## Licença
+
+MIT. Veja o arquivo [LICENSE](LICENSE).

@@ -5,14 +5,11 @@ declare(strict_types=1);
 namespace Gsebastiao\Auditable\Contracts;
 
 /**
- * Gera o identificador que agrupa várias entradas de auditoria produzidas
- * pela mesma operação lógica (ex.: um update que afeta várias linhas, ou
- * uma transação que toca várias tabelas).
+ * Gera o id que agrupa as auditorias de uma mesma operação (batch).
  *
- * A implementação padrão usa ULID — ordenável por tempo, sem colisão sob
- * concorrência e sem consultar o banco. Isto substitui o esquema
- * "uuid-0001" baseado em SELECT MAX do BaseModel original, que era uma
- * race condition e um gargalo em ambiente SaaS concorrente.
+ * O padrão é um ULID (26 caracteres, ordenável por tempo, sem consultar o
+ * banco). Se trocar por outro formato, confirme que cabe na coluna `batch`
+ * da migration (char(26) no padrão).
  */
 interface BatchIdGenerator
 {
