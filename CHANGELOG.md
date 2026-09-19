@@ -90,6 +90,15 @@ testes passou de 37 para 118 testes e foi executada no Laravel 11.4, 11.x,
 
 ### Corrigido
 
+- **A migration do pacote passa a ser registada sempre.** Estava dentro do
+  bloco `runningInConsole()` e só era carregada depois de um `glob()` em
+  `database/migrations` não encontrar uma cópia publicada. Resultado: quem
+  dispara o `migrate` fora da consola (`Artisan::call('migrate')` num
+  instalador, num webhook de deploy ou nos testes do projeto) nunca via a
+  migration, e a tabela de auditoria não era criada. O
+  `loadMigrationsFrom()` passou para fora do `runningInConsole()` e a
+  verificação por `glob()` foi removida — é o Laravel que já descarta a cópia
+  duplicada, porque indexa as migrations pelo nome do ficheiro.
 - `withoutTenantScope()` não removia o filtro de tenant (o scope era uma classe anónima).
 - `tenant.column` era ignorado ao gravar: a auditoria usava sempre `tenant_id`.
 - O model de auditoria não era filtrado por tenant com o multitenancy por coluna ligado.
@@ -145,9 +154,9 @@ testes passou de 37 para 118 testes e foi executada no Laravel 11.4, 11.x,
   pacote a carrega dele e `php artisan migrate` basta. `vendor:publish
   --tag=auditable-migrations` continua a existir para quem quer editá-la
   (ex.: ids UUID/ULID); o arquivo publicado mantém o nome do pacote
-  (`2026_01_01_000000_create_audits_table.php`) e uma cópia já publicada (mesmo
-  com outro timestamp) tem prioridade. A migration ignora a tabela se ela já
-  existir.
+  (`2026_01_01_000000_create_audits_table.php`), e é por esse nome que o
+  Laravel a identifica: a cópia do projeto substitui a do pacote e a tabela
+  nunca é criada duas vezes. A migration ignora a tabela se ela já existir.
 - `AUDITABLE_DEFAULT_created_by` (com `created_by` minúsculo) deixou de ser lida
   como alternativa; use `AUDITABLE_DEFAULT_CREATED_BY`.
 

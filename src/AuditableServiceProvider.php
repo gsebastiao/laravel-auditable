@@ -28,8 +28,6 @@ use Illuminate\Support\ServiceProvider;
 
 final class AuditableServiceProvider extends ServiceProvider
 {
-    private const MIGRATION = '2026_01_01_000000_create_audits_table.php';
-
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/auditable.php', 'auditable');
@@ -85,6 +83,16 @@ final class AuditableServiceProvider extends ServiceProvider
             fn (JobProcessed|JobFailed|JobExceptionOccurred $event) => QueueContext::jobFinished($event->job),
         );
 
+        // A migration corre com `php artisan migrate`, mesmo sem ser publicada.
+        // Fica FORA do runningInConsole(): quem dispara o migrate a partir de
+        // HTTP (Artisan::call('migrate') num instalador, num webhook de deploy
+        // ou nos testes do projeto) tem de a ver na mesma.
+        //
+        // Se o projeto publicar a migration, o ficheiro mantém o mesmo nome; o
+        // Laravel indexa as migrations pelo nome, por isso a cópia do projeto
+        // substitui a do pacote e a tabela nunca é criada duas vezes.
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+
         if (! $this->app->runningInConsole()) {
             return;
         }
@@ -93,12 +101,9 @@ final class AuditableServiceProvider extends ServiceProvider
             __DIR__.'/../config/auditable.php' => config_path('auditable.php'),
         ], 'auditable-config');
 
-        // A migration corre com `php artisan migrate`, mesmo sem ser publicada.
         // Publicar é opcional: serve para quem quer editá-la (ex.: ids UUID).
-        $this->loadUnpublishedMigrations();
-
         $this->publishes([
-            __DIR__.'/../database/migrations/'.self::MIGRATION => $this->migrationPath(self::MIGRATION),
+            __DIR__.'/../database/migrations' => database_path('migrations'),
         ], 'auditable-migrations');
 
         // Widget JS opcional. O destino respeita config('auditable.js.publish_path');
@@ -110,35 +115,5 @@ final class AuditableServiceProvider extends ServiceProvider
         ], 'auditable-js');
 
         $this->commands([PublishAuditTableJs::class]);
-    }
-
-    /**
-     * Carrega a migration do pacote, a não ser que o projeto já tenha uma
-     * cópia publicada (com este nome ou com outro timestamp): nesse caso
-     * vale a cópia do projeto, e a tabela nunca é criada duas vezes.
-     */
-    private function loadUnpublishedMigrations(): void
-    {
-        if ($this->publishedMigration(self::MIGRATION) === null) {
-            $this->loadMigrationsFrom(__DIR__.'/../database/migrations/'.self::MIGRATION);
-        }
-    }
-
-    /** A cópia já publicada no projeto (qualquer timestamp), ou null. */
-    private function publishedMigration(string $file): ?string
-    {
-        $name = substr($file, strlen('2026_01_01_000000_'));
-
-        return (glob(database_path("migrations/*_{$name}")) ?: [])[0] ?? null;
-    }
-
-    /**
-     * Destino da publicação: o mesmo nome do arquivo do pacote (assim o
-     * Laravel o reconhece como a mesma migration), ou a cópia que o projeto
-     * já tem — publicar de novo nunca cria uma segunda migration.
-     */
-    private function migrationPath(string $file): string
-    {
-        return $this->publishedMigration($file) ?? database_path('migrations/'.$file);
     }
 }
