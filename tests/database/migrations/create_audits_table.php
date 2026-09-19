@@ -12,7 +12,7 @@ return new class extends Migration
 {
     public function up(): void
     {
-        (require __DIR__.'/../../../database/migrations/create_audits_table.php.stub')->up();
+        (require __DIR__.'/../../../database/migrations/2026_01_01_000000_create_audits_table.php')->up();
 
         Schema::create('users', function (Blueprint $table) {
             $table->id();

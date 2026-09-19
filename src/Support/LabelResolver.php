@@ -19,17 +19,26 @@ use Stringable;
  *
  * Cada valor é consultado uma única vez por requisição/job (cache em
  * memória), o que evita N+1 quando o mesmo status aparece em várias linhas.
+ * O cache tem um teto: numa job longa, com milhões de valores distintos, a
+ * memória não cresce sem limite (o valor mais antigo sai quando enche).
  */
 final class LabelResolver
 {
+    /** Quantos labels o cache guarda, no máximo. */
+    public const MAX_ENTRIES = 10_000;
+
     /** @var array<string, string|null> */
     private array $cache = [];
 
     /**
      * @param  ConnectionResolverInterface|ConnectionInterface  $db  O gerenciador de conexões
      *         do Laravel (uso normal) ou uma conexão fixa (útil em testes).
+     * @param  int  $maxEntries  Teto do cache (padrão: MAX_ENTRIES).
      */
-    public function __construct(private ConnectionResolverInterface|ConnectionInterface $db) {}
+    public function __construct(
+        private ConnectionResolverInterface|ConnectionInterface $db,
+        private int $maxEntries = self::MAX_ENTRIES,
+    ) {}
 
     /**
      * @param  array<string, mixed>  $map
@@ -72,6 +81,61 @@ final class LabelResolver
         return $map['label'] ?? $map['column'] ?? 'unknown';
     }
 
+    /**
+     * Pré-carrega, numa consulta só (WHERE chave IN (...)), os labels de
+     * muitos valores de um mapa `direct`. Usado pelas operações em massa para
+     * não consultar valor a valor. Mapas `join`/`alias` são ignorados (esses
+     * resolvem-se valor a valor, também com cache).
+     *
+     * Valores não encontrados não ficam em cache: seguem o caminho normal,
+     * que também cobre diferenças de maiúsculas/minúsculas do banco.
+     *
+     * @param  array<string, mixed>  $map
+     * @param  array<int, mixed>     $values
+     */
+    public function warm(array $map, array $values, ?string $connection = null): void
+    {
+        if (($map['type'] ?? 'direct') !== 'direct') {
+            return;
+        }
+
+        $pending = [];
+
+        foreach ($values as $value) {
+            $value = $this->normalize($value);
+
+            if ($value !== null && $value !== '' && ! array_key_exists($this->directKey($map, $value, $connection), $this->cache)) {
+                $pending[(string) $value] = $value;
+            }
+        }
+
+        $table = $map['table'];
+        $key = $map['key'] ?? 'id';
+        $column = $map['column'] ?? 'nome';
+
+        foreach (array_chunk(array_values($pending), 500) as $chunk) {
+            $query = $this->connection($connection)->table($table)
+                ->select(["{$table}.{$key} as label_key", "{$table}.{$column} as label_value"])
+                ->whereIn("{$table}.{$key}", $chunk);
+
+            foreach ($map['scope'] ?? [] as $col => $val) {
+                $query->where("{$table}.{$col}", $val);
+            }
+
+            $found = [];
+
+            foreach ($query->get() as $row) {
+                $found[(string) $row->label_key] = $this->toLabel($row->label_value);
+            }
+
+            foreach ($chunk as $value) {
+                if (array_key_exists((string) $value, $found)) {
+                    $this->remember($this->directKey($map, $value, $connection), $found[(string) $value]);
+                }
+            }
+        }
+    }
+
     /** @param array<string, mixed> $map */
     private function resolveDirect(string|int|float $value, array $map, ?string $connection): ?string
     {
@@ -80,7 +144,7 @@ final class LabelResolver
         $column = $map['column'] ?? 'nome';
         $scope = $map['scope'] ?? [];
 
-        $cacheKey = implode('|', ['direct', (string) $connection, $table, $key, $column, serialize($scope), (string) $value]);
+        $cacheKey = $this->directKey($map, $value, $connection);
 
         if (array_key_exists($cacheKey, $this->cache)) {
             return $this->cache[$cacheKey];
@@ -96,7 +160,7 @@ final class LabelResolver
 
         $row = $query->first();
 
-        return $this->cache[$cacheKey] = $this->toLabel($row?->{$column} ?? null);
+        return $this->remember($cacheKey, $this->toLabel($row?->{$column} ?? null));
     }
 
     /** @param array<string, mixed> $map */
@@ -132,6 +196,29 @@ final class LabelResolver
         }
 
         $label = ($builder !== null && $hasColumn) ? $this->toLabel($builder->first()?->label ?? null) : null;
+
+        return $this->remember($cacheKey, $label);
+    }
+
+    /** @param array<string, mixed> $map */
+    private function directKey(array $map, string|int|float $value, ?string $connection): string
+    {
+        return implode('|', [
+            'direct',
+            (string) $connection,
+            $map['table'],
+            $map['key'] ?? 'id',
+            $map['column'] ?? 'nome',
+            serialize($map['scope'] ?? []),
+            (string) $value,
+        ]);
+    }
+
+    private function remember(string $cacheKey, ?string $label): ?string
+    {
+        if (! array_key_exists($cacheKey, $this->cache) && count($this->cache) >= $this->maxEntries) {
+            unset($this->cache[array_key_first($this->cache)]);
+        }
 
         return $this->cache[$cacheKey] = $label;
     }

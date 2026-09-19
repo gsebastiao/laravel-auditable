@@ -16,6 +16,9 @@ namespace Gsebastiao\Auditable\Contracts;
  * AppServiceProvider:
  *
  *   $this->app->bind(ContextResolver::class, MeuContexto::class);
+ *
+ * Numa implementação sua, para manter a herança de usuário/tenant dentro de
+ * jobs, use QueueContext::userId() e QueueContext::tenantId() como reserva.
  */
 interface ContextResolver
 {

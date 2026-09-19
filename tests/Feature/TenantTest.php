@@ -30,7 +30,7 @@ final class TenantTest extends TestCase
         ]);
 
         Schema::drop(config('auditable.table'));
-        (require __DIR__.'/../../database/migrations/create_audits_table.php.stub')->up();
+        (require __DIR__.'/../../database/migrations/2026_01_01_000000_create_audits_table.php')->up();
         $this->app->forgetScopedInstances();
     }
 

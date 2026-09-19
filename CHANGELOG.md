@@ -1,11 +1,13 @@
 # Changelog
 
-## [Não lançado] — correções gerais e documentação nova
+## [Não lançado]
 
 Esta versão corrige bugs encontrados numa revisão completa do pacote (todos
 cobertos agora por testes), simplifica a API e traz um README reescrito para
-iniciantes. A suíte de testes passou de 37 para 93 testes e foi executada no
-Laravel 11.4, 11.x, 12.x e 13.x.
+iniciantes. Acrescenta também integração automática com filas, updates e
+deletes em massa auditados e filtros para telas de pesquisa. A suíte de
+testes passou de 37 para 118 testes e foi executada no Laravel 11.4, 11.x,
+12.x e 13.x.
 
 ### ⚠️ Mudanças que podem exigir ajustes no seu código
 
@@ -80,6 +82,12 @@ Laravel 11.4, 11.x, 12.x e 13.x.
     `config('auditable.table')` (padrão `audit_table`). Nada muda para quem
     já tem a config publicada.
 
+16. **Jobs em fila herdam a operação e o autor.** Uma job despachada durante
+    uma operação grava no mesmo batch, e as auditorias feitas por jobs passam
+    a ter o `created_by` de quem as despachou (antes ficava vazio ou com o
+    `default_created_by`). Se o seu código dependia do comportamento antigo,
+    desligue `propagate_batch`/`propagate_user` em `config('auditable.queue')`.
+
 ### Corrigido
 
 - `withoutTenantScope()` não removia o filtro de tenant (o scope era uma classe anónima).
@@ -101,9 +109,25 @@ Laravel 11.4, 11.x, 12.x e 13.x.
 
 ### Novo
 
+- **Filas sem código nas jobs.** Jobs, listeners, notificações e e-mails em
+  fila despachados durante uma operação continuam-na (mesmo `batch`) e gravam
+  em nome de quem os despachou; opcionalmente, também herdam o tenant.
+  Configurável em `config('auditable.queue')`. Seguro com o driver `sync`:
+  nada fica "preso" à requisição depois de a job acabar.
+- `Model::where(...)->auditedUpdate([...])` e `->auditedDelete()` — update e
+  delete em massa com uma auditoria por registro: lotes travados e atômicos,
+  valores calculados pelo banco (`DB::raw`), labels do `resolveMap`
+  pré-carregados numa consulta por lote e auditorias gravadas em bloco.
+- `Audit::filter($request->all())` — vários filtros de uma vez (usuário,
+  evento, model, registro, operação, período, só falhas), com a receita de uma
+  página de pesquisa no README.
+- `Contracts\BulkAuditRepository` — interface opcional para repositórios
+  personalizados gravarem em bloco.
+- O cache de labels passou a ter um teto (10 000 entradas), para jobs longas
+  não esgotarem a memória.
 - `Audit::for($tipo, $id, $evento)` — auditar sem model (o mesmo que a macro `DB::table()->audit()`, sem a tabela sem uso).
 - `Audit::withoutAuditing(fn () => ...)` — desligar a auditoria só num trecho.
-- `Audit::useBatch($batch, fn () => ...)` — continuar uma operação numa job, restaurando o batch anterior no fim.
+- `Audit::useBatch($batch, fn () => ...)` — usar um batch específico, restaurando o anterior no fim.
 - `Audit::resolveTenantUsing(...)` — resolver de tenant compatível com `config:cache`.
 - `Audit::inBatch()`, `Audit::failures()`, `Audit::query()` etc. — a fachada repassa as consultas ao model de auditoria (um único `use`).
 - `$model->operations()` / `Model::operationsFor($id)` — todas as operações de um registro (o histórico completo, agrupável por batch).
@@ -114,6 +138,18 @@ Laravel 11.4, 11.x, 12.x e 13.x.
 - `config('auditable.tenant.strict')` — sem tenant identificado, não mostrar nada.
 - `config('auditable.user_model')`.
 - Migration com o tipo das chaves editável (`integer`, `uuid`, `ulid`, `string`) e um índice novo `(subject_type, event, subject_id)` para as listagens.
+
+- **Config e migration opcionais.** O `config/auditable.php` não precisa de ser
+  publicado: cada opção tem uma variável `AUDITABLE_*` no `.env` (tabela no
+  README, em "Configurar sem publicar o config"). A migration também não: o
+  pacote a carrega dele e `php artisan migrate` basta. `vendor:publish
+  --tag=auditable-migrations` continua a existir para quem quer editá-la
+  (ex.: ids UUID/ULID); o arquivo publicado mantém o nome do pacote
+  (`2026_01_01_000000_create_audits_table.php`) e uma cópia já publicada (mesmo
+  com outro timestamp) tem prioridade. A migration ignora a tabela se ela já
+  existir.
+- `AUDITABLE_DEFAULT_created_by` (com `created_by` minúsculo) deixou de ser lida
+  como alternativa; use `AUDITABLE_DEFAULT_CREATED_BY`.
 
 ### Para instalações existentes
 

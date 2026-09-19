@@ -295,6 +295,64 @@ class Audit extends Model
     }
 
     /**
+     * Vários filtros de uma vez, para uma tela de pesquisa. Recebe
+     * $request->all() diretamente: chaves vazias ou desconhecidas (page,
+     * _token...) são ignoradas, e datas inválidas também.
+     *
+     *   Audit::filter($request->all())->latest()->paginate(30);
+     *
+     * Chaves:
+     *   user      id de quem fez
+     *   event     nome do evento (texto ou lista: ['created', 'updated'])
+     *   model     classe do model ou nome livre usado no Audit::for()
+     *   id        id do registro (use junto com model)
+     *   batch     id da operação
+     *   from, to  período, datas inclusive ('2026-07-01')
+     *   failures  "1"/true = só as falhas
+     *
+     * @param  array<string, mixed>  $filters
+     */
+    public function scopeFilter(Builder $query, array $filters): Builder
+    {
+        $filled = static fn (string $key): bool => isset($filters[$key]) && $filters[$key] !== '' && $filters[$key] !== [];
+        $isDate = static fn (string $key): bool => $filled($key) && is_string($filters[$key]) && strtotime($filters[$key]) !== false;
+
+        if ($filled('user') && is_scalar($filters['user'])) {
+            $query->byUser($filters['user']);
+        }
+
+        if ($filled('event')) {
+            $query->action(is_array($filters['event']) ? array_values($filters['event']) : (string) $filters['event']);
+        }
+
+        if ($filled('model') && is_string($filters['model'])) {
+            $query->where('subject_type', static::morphTypeOf($filters['model']));
+        }
+
+        if ($filled('id') && is_scalar($filters['id'])) {
+            $query->where('subject_id', $filters['id']);
+        }
+
+        if ($filled('batch') && is_string($filters['batch'])) {
+            $query->inBatch($filters['batch']);
+        }
+
+        if ($isDate('from')) {
+            $query->whereDate('created_at', '>=', $filters['from']);
+        }
+
+        if ($isDate('to')) {
+            $query->whereDate('created_at', '<=', $filters['to']);
+        }
+
+        if (filter_var($filters['failures'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            $query->failures();
+        }
+
+        return $query;
+    }
+
+    /**
      * A ÚLTIMA operação (batch) de que o registro participou, com as linhas
      * de todas as tabelas. Nenhuma auditoria = consulta vazia.
      */

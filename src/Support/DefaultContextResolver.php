@@ -12,14 +12,17 @@ use InvalidArgumentException;
 /**
  * Implementação padrão do ContextResolver.
  *
- * Usuário: o id do usuário autenticado no guard configurado (ou no guard
- *          padrão). Sem ninguém logado (console, filas, cron), usa
- *          config('auditable.default_created_by').
+ * Usuário, por esta ordem:
+ *   1. o usuário autenticado no guard configurado (ou no guard padrão);
+ *   2. dentro de uma job: quem a despachou (ver QueueContext);
+ *   3. config('auditable.default_created_by').
  *
- * Tenant:  pergunta a quem você configurou, por esta ordem:
- *            1. config('auditable.tenant.resolver') — uma classe invocável;
- *            2. Audit::resolveTenantUsing(fn () => ...) — no AppServiceProvider.
- *          O pacote nunca decide qual é o tenant; só pergunta.
+ * Tenant, por esta ordem:
+ *   1. config('auditable.tenant.resolver') — uma classe invocável — ou
+ *      Audit::resolveTenantUsing(fn () => ...) no AppServiceProvider;
+ *   2. dentro de uma job, se o resolver não identificar nenhum: o tenant de
+ *      quem a despachou (só com config('auditable.queue.propagate_tenant')).
+ *   O pacote nunca decide qual é o tenant; só pergunta.
  */
 final class DefaultContextResolver implements ContextResolver
 {
@@ -32,10 +35,17 @@ final class DefaultContextResolver implements ContextResolver
 
     public function userId(): int|string|null
     {
-        return $this->auth->guard($this->guard)->id() ?? $this->normalizeId($this->defaultUserId);
+        return $this->auth->guard($this->guard)->id()
+            ?? QueueContext::userId()
+            ?? $this->normalizeId($this->defaultUserId);
     }
 
     public function tenantId(): int|string|null
+    {
+        return $this->resolveTenant() ?? QueueContext::tenantId();
+    }
+
+    private function resolveTenant(): int|string|null
     {
         $resolver = $this->tenantResolver ?? Audit::tenantResolver();
 

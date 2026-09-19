@@ -25,7 +25,7 @@ return [
     | Tabela onde as auditorias são gravadas.
     | Se mudar, faça-o ANTES de rodar a migration.
     */
-    'table' => 'audit_table',
+    'table' => env('AUDITABLE_TABLE', 'audit_table'),
 
     /*
     | Conexão de banco da auditoria. null = a conexão padrão da aplicação
@@ -39,33 +39,33 @@ return [
     | Model usado para ler e gravar a tabela de auditoria. Troque só se
     | estender Gsebastiao\Auditable\Models\Audit para acrescentar algo.
     */
-    'model' => Audit::class,
+    'model' => env('AUDITABLE_MODEL', Audit::class),
 
     /*
     |--------------------------------------------------------------------------
     | Usuários
     |--------------------------------------------------------------------------
     | auth_guard:         de que guard vem o usuário logado (null = o padrão).
+    | user_model:         model dos usuários, para $audit->user.
+    |                       null = config('auth.providers.users.model').
+    | users_table:        tabela dos usuários, usada pelo AuditColumnJoiner.
     | default_created_by: id gravado quando NÃO há ninguém logado (comandos,
     |                     filas, cron, webhooks). null = fica vazio ("Sistema").
-    | user_model:         model dos usuários, para $audit->user.
-    |                     null = config('auth.providers.users.model').
-    | users_table:        tabela dos usuários, usada pelo AuditColumnJoiner.
     */
-    'auth_guard' => null,
+    'auth_guard' => env('AUDITABLE_AUTH_GUARD', null),
 
-    'default_created_by' => env('AUDITABLE_DEFAULT_CREATED_BY', env('AUDITABLE_DEFAULT_created_by')),
+    'user_model' => env('AUDITABLE_USER_MODEL', null),
 
-    'user_model' => null,
+    'users_table' => env('AUDITABLE_USER_TABLE', 'users'),
 
-    'users_table' => 'users',
+    'default_created_by' => env('AUDITABLE_DEFAULT_CREATED_BY'),
 
     /*
     | Prefixo das colunas criadas pelo AuditColumnJoiner nas listagens
     | (audit_created_by, audit_created_at, ...). Evita choque com as colunas
     | created_at/updated_at da sua própria tabela.
     */
-    'column_prefix' => 'audit_',
+    'column_prefix' => env('AUDITABLE_COLUMN_PREFIX', 'audit_'),
 
     /*
     |--------------------------------------------------------------------------
@@ -88,9 +88,31 @@ return [
     */
     'tenant' => [
         'enabled' => env('AUDITABLE_TENANT_ENABLED', false),
-        'column' => 'tenant_id',
-        'resolver' => null,
-        'strict' => false,
+        'column' => env('AUDITABLE_TENANT_COLUMN', 'tenant_id'),
+        'resolver' => env('AUDITABLE_TENANT_RESOLVER', null),
+        'strict' => env('AUDITABLE_TENANT_STRICT', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Filas
+    |--------------------------------------------------------------------------
+    | Uma job (ou listener, notificação, e-mail em fila) despachada durante
+    | uma requisição leva consigo, sem código nenhum na job:
+    |
+    | propagate_user:   quem estava logado — vira o created_by das auditorias
+    |                   feitas pela job (no worker ninguém está logado).
+    | propagate_batch:  o batch da operação em curso — o que a job gravar
+    |                   entra na mesma operação.
+    | propagate_tenant: o tenant atual (multitenancy por coluna), usado na job
+    |                   quando o resolver não identificar nenhum. Desligado por
+    |                   padrão: ligue se as suas jobs devem ficar no tenant de
+    |                   quem as despachou.
+    */
+    'queue' => [
+        'propagate_user' => env('AUDITABLE_PROPAGATE_USER', true),
+        'propagate_batch' => env('AUDITABLE_PROPAGATE_BATCH', true),
+        'propagate_tenant' => env('AUDITABLE_PROPAGATE_TENANT', false),
     ],
 
     /*
@@ -98,7 +120,7 @@ return [
     | onde `php artisan auditable:publish-js` copia o arquivo.
     */
     'js' => [
-        'publish_path' => 'assets/js',
+        'publish_path' => env('AUDITABLE_PUBLISH_PATH', 'assets/js'),
     ],
 
     /*

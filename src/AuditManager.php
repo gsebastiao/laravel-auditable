@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace Gsebastiao\Auditable;
 
+use Closure;
 use Gsebastiao\Auditable\Contracts\AuditRepository;
 use Gsebastiao\Auditable\Contracts\BatchIdGenerator;
+use Gsebastiao\Auditable\Contracts\BulkAuditRepository;
 use Gsebastiao\Auditable\Contracts\ContextResolver;
 use Gsebastiao\Auditable\Support\AuditOptions;
 use Gsebastiao\Auditable\Support\ChangeSetBuilder;
 use Gsebastiao\Auditable\Support\DebugInfoCollector;
 use Gsebastiao\Auditable\Support\ManualAuditPayload;
+use Gsebastiao\Auditable\Support\QueueContext;
 use Illuminate\Database\Eloquent\Model;
 use Throwable;
 use WeakMap;
@@ -65,7 +68,8 @@ final class AuditManager
      */
     public function batch(callable $callback): mixed
     {
-        if ($this->currentBatch !== null) {
+        // Um batch já aberto — ou herdado de quem despachou esta job — é reaproveitado.
+        if ($this->currentBatch() !== null) {
             return $callback();
         }
 
@@ -81,7 +85,7 @@ final class AuditManager
     /** Abre um batch sem callback (feche com endBatch()). Prefira batch(). */
     public function beginBatch(): string
     {
-        return $this->currentBatch ??= $this->batchIds->generate();
+        return $this->currentBatch ??= (QueueContext::batch() ?? $this->batchIds->generate());
     }
 
     public function endBatch(): void
@@ -106,7 +110,7 @@ final class AuditManager
         }
 
         $previous = $this->currentBatch;
-        $this->currentBatch = $batchId ?? $previous ?? $this->batchIds->generate();
+        $this->currentBatch = $batchId ?? $this->currentBatch() ?? $this->batchIds->generate();
 
         try {
             return $callback();
@@ -115,9 +119,36 @@ final class AuditManager
         }
     }
 
+    /**
+     * O batch em uso: o aberto neste processo ou, dentro de uma job, o
+     * herdado de quem a despachou (ver QueueContext).
+     */
     public function currentBatch(): ?string
     {
-        return $this->currentBatch;
+        return $this->currentBatch ?? QueueContext::batch();
+    }
+
+    /**
+     * Transação de banco + batch. A transação é aberta na conexão dos dados
+     * ($connection, ou a padrão); se a auditoria usa outra conexão, ela entra
+     * numa transação aninhada para ser desfeita junto.
+     *
+     * @template T
+     * @param  callable(): T  $callback
+     * @return T
+     */
+    public function transaction(callable $callback, ?string $connection = null): mixed
+    {
+        $db = app('db');
+        $data = $db->connection($connection);
+        $audit = $db->connection(config('auditable.connection'));
+        $callback = Closure::fromCallable($callback);
+
+        $run = $data->getName() === $audit->getName()
+            ? fn () => $data->transaction($callback)
+            : fn () => $data->transaction(fn () => $audit->transaction($callback));
+
+        return $this->batch($run);
     }
 
     /**
@@ -325,7 +356,7 @@ final class AuditManager
         $now = $this->now();
 
         $payload = [
-            'batch' => $batch ?? $this->currentBatch ?? $this->batchIds->generate(),
+            'batch' => $batch ?? $this->currentBatch() ?? $this->batchIds->generate(),
             'subject_type' => $subjectType,
             'subject_id' => $subjectId,
             'event' => $event,
@@ -343,9 +374,101 @@ final class AuditManager
         $this->repository->persist($payload);
     }
 
+    /**
+     * @internal usado por auditedUpdate().
+     *
+     * Cada par é [model lido do banco ANTES do update, atributos crus DEPOIS].
+     * O diff sai igual ao do evento automático `updated`: quem decide o que
+     * mudou é o próprio Eloquent (getDirty()), com os mesmos casts e máscaras.
+     *
+     * @param  array<int, array{0: Model, 1: array<string, mixed>}>  $pairs
+     */
+    public function recordBulkUpdate(array $pairs, AuditOptions $options): void
+    {
+        if (! $this->isEnabled() || $pairs === []) {
+            return;
+        }
+
+        $this->changes->warm(
+            [...array_map(static fn (array $pair) => $pair[0]->getRawOriginal(), $pairs), ...array_column($pairs, 1)],
+            $options,
+            $pairs[0][0]->getConnectionName(),
+        );
+
+        $payloads = [];
+
+        foreach ($pairs as [$model, $after]) {
+            $before = $model->getRawOriginal();
+
+            $model->setRawAttributes(array_merge($model->getAttributes(), $after));
+            $model->syncChanges();
+
+            [$changes, $debugInfo] = $this->automaticChangesAndDebug($model, 'updated', $options, $before);
+
+            if ($changes !== [] || $options->logEmpty) {
+                $payloads[] = $this->payload($model, 'updated', $changes, $debugInfo);
+            }
+        }
+
+        $this->persistMany($payloads);
+    }
+
+    /**
+     * @internal usado por auditedDelete().
+     *
+     * Cada model traz o estado a registrar: o de antes do delete ou, com
+     * SoftDeletes, o de depois (já com deleted_at).
+     *
+     * @param  array<int, Model>  $models
+     */
+    public function recordBulkDelete(array $models, AuditOptions $options): void
+    {
+        $models = array_values($models);
+
+        if (! $this->isEnabled() || $models === []) {
+            return;
+        }
+
+        $this->changes->warm(
+            array_map(static fn (Model $model) => $model->getRawOriginal(), $models),
+            $options,
+            $models[0]->getConnectionName(),
+        );
+
+        $payloads = [];
+
+        foreach ($models as $model) {
+            [$changes, $debugInfo] = $this->automaticChangesAndDebug($model, 'deleted', $options);
+
+            if ($changes !== [] || $options->logEmpty) {
+                $payloads[] = $this->payload($model, 'deleted', $changes, $debugInfo);
+            }
+        }
+
+        $this->persistMany($payloads);
+    }
+
     // ------------------------------------------------------------------
     // Montagem
     // ------------------------------------------------------------------
+
+    /** Grava em bloco quando o repositório sabe; senão, linha a linha. */
+    private function persistMany(array $payloads): void
+    {
+        if ($payloads === []) {
+            return;
+        }
+
+        if ($this->repository instanceof BulkAuditRepository) {
+            $this->repository->persistMany($payloads);
+
+            return;
+        }
+
+        foreach ($payloads as $payload) {
+            $this->repository->persist($payload);
+        }
+    }
 
     /**
      * @param  array<string, mixed>       $changes
@@ -357,7 +480,7 @@ final class AuditManager
         $now = $this->now();
 
         $payload = [
-            'batch' => $this->currentBatch ?? $this->batchIds->generate(),
+            'batch' => $this->currentBatch() ?? $this->batchIds->generate(),
             'subject_type' => $model->getMorphClass(),
             'subject_id' => $model->getKey(),
             'event' => $event,

@@ -28,8 +28,15 @@ return new class extends Migration
     public function up(): void
     {
         $tableName = config('auditable.table', 'audit_table');
+        $schema = Schema::connection(config('auditable.connection'));
 
-        Schema::connection(config('auditable.connection'))->create($tableName, function (Blueprint $table) {
+        // Já existe (ex.: migration publicada e apagada depois, ou tabela criada
+        // à mão): não faz nada, para o migrate nunca falhar por isso.
+        if ($schema->hasTable($tableName)) {
+            return;
+        }
+
+        $schema->create($tableName, function (Blueprint $table) {
             $table->id();
 
             // Agrupa as auditorias de uma mesma operação (Audit::transaction()).

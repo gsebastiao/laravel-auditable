@@ -24,6 +24,7 @@ use Gsebastiao\Auditable\Support\QueryBuilderPendingAudit;
  * @method static \Illuminate\Database\Eloquent\Builder action(string|array $action)
  * @method static \Illuminate\Database\Eloquent\Builder byUser(int|string $userId)
  * @method static \Illuminate\Database\Eloquent\Builder failures()
+ * @method static \Illuminate\Database\Eloquent\Builder filter(array $filters)
  * @method static \Illuminate\Database\Eloquent\Builder operationOf(string $subjectType, int|string $subjectId)
  * @method static \Illuminate\Database\Eloquent\Builder operationsOf(string $subjectType, int|string $subjectId)
  * @method static \Illuminate\Database\Eloquent\Builder withoutTenantScope()
@@ -60,21 +61,12 @@ final class Audit
      */
     public static function transaction(callable $callback, ?string $connection = null): mixed
     {
-        $db = app('db');
-        $data = $db->connection($connection);
-        $audit = $db->connection(config('auditable.connection'));
-        $callback = Closure::fromCallable($callback);
-
-        $run = $data->getName() === $audit->getName()
-            ? fn () => $data->transaction($callback)
-            : fn () => $data->transaction(fn () => $audit->transaction($callback));
-
-        return app(AuditManager::class)->batch($run);
+        return app(AuditManager::class)->transaction($callback, $connection);
     }
 
     /**
-     * O batch aberto neste momento, ou null. Use para passar a operação a uma
-     * job da fila (ver useBatch()).
+     * O batch em uso neste momento, ou null. Dentro de uma job despachada
+     * durante uma operação, é o batch dessa operação (herdado sozinho).
      */
     public static function currentBatch(): ?string
     {
@@ -82,15 +74,16 @@ final class Audit
     }
 
     /**
-     * Continua um batch existente — tipicamente dentro de uma job:
+     * Usa um batch específico — controle manual, raramente necessário (jobs
+     * despachadas durante uma operação já a continuam sozinhas):
      *
-     *   Audit::useBatch($this->batchId, function () {
-     *       // tudo aqui entra no mesmo batch da operação original
+     *   Audit::useBatch($batchId, function () {
+     *       // tudo aqui entra no batch $batchId
      *   });
      *
      * Com callback, o batch anterior é restaurado no fim. Sem callback, o
-     * batch fica ativo até ao fim da requisição/job. $batchId null é aceito
-     * (a job foi despachada fora de um batch): nesse caso abre-se um novo.
+     * batch fica ativo até ao fim da requisição/job. Com $batchId null,
+     * continua o batch em uso ou, se não houver nenhum, abre um novo.
      *
      * @template T
      * @param  (callable(): T)|null  $callback

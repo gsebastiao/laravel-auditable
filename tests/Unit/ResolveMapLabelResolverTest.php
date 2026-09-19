@@ -185,4 +185,27 @@ final class ResolveMapLabelResolverTest extends TestCase
         $this->assertNull($resolver->resolve(null, $map));
         $this->assertNull($resolver->resolve('', $map));
     }
+
+    public function test_cache_tem_teto_e_descarta_o_mais_antigo(): void
+    {
+        $this->db->seed('status', [
+            ['id' => 1, 'nome' => 'A'], ['id' => 2, 'nome' => 'B'],
+            ['id' => 3, 'nome' => 'C'], ['id' => 4, 'nome' => 'D'],
+        ]);
+        $resolver = new LabelResolver($this->db, maxEntries: 3);
+        $map = ResolveMap::direct('Status', 'status');
+
+        foreach ([1, 2, 3] as $id) {
+            $resolver->resolve($id, $map);
+        }
+        $this->db->seed('status', [
+            ['id' => 1, 'nome' => 'A2'], ['id' => 2, 'nome' => 'B2'],
+            ['id' => 3, 'nome' => 'C2'], ['id' => 4, 'nome' => 'D2'],
+        ]);
+
+        $this->assertSame('C', $resolver->resolve(3, $map), 'dentro do teto: veio do cache');
+        $resolver->resolve(4, $map); // cache cheio: o 1 (mais antigo) sai
+        $this->assertSame('A2', $resolver->resolve(1, $map), 'o 1 foi descartado e consultado de novo');
+        $this->assertSame('C', $resolver->resolve(3, $map));
+    }
 }

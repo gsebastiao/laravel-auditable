@@ -127,6 +127,30 @@ final class ChangeSetBuilder
         return array_diff_key($attributes, array_flip($options->neverSnapshot));
     }
 
+    /**
+     * Pré-carrega os labels do resolveMap para muitas linhas de uma vez (uma
+     * consulta por campo, em vez de uma por valor). Usado pelas operações em
+     * massa antes de montar as auditorias de um lote.
+     *
+     * @param  array<int, array<string, mixed>>  $rows  Atributos crus de cada linha.
+     */
+    public function warm(array $rows, AuditOptions $options, ?string $connection = null): void
+    {
+        foreach ($options->resolveMap as $field => $map) {
+            $values = [];
+
+            foreach ($rows as $row) {
+                if (array_key_exists($field, $row)) {
+                    $values[] = $row[$field];
+                }
+            }
+
+            if ($values !== []) {
+                $this->labels->warm($map, $values, $connection);
+            }
+        }
+    }
+
     private function skip(string $field, AuditOptions $options): bool
     {
         if (in_array($field, $options->except, true) || in_array($field, $options->neverSnapshot, true)) {

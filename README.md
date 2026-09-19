@@ -22,7 +22,9 @@ como esta:
 
 - Registra criação, alteração e exclusão sozinho (e restauração, com SoftDeletes).
 - Traduz chaves estrangeiras em nomes legíveis (`resolveMap`).
-- Agrupa várias gravações de uma mesma ação do usuário numa só **operação**.
+- Agrupa várias gravações de uma mesma ação do usuário numa só **operação** —
+  inclusive o que os jobs em fila gravarem depois.
+- Audita updates e deletes **em massa**, um registro de cada vez no histórico.
 - Registra falhas com detalhes técnicos que só o desenvolvedor vê.
 - Recria registros apagados a partir da auditoria.
 - Mostra "criado por / alterado por" numa listagem com uma única consulta.
@@ -44,18 +46,20 @@ como esta:
 9. [Registrar ações próprias: `auditAction()`](#registrar-ações-próprias-auditaction)
 10. [Personalizar a entrada automática: `audit()`](#personalizar-a-entrada-automática-audit)
 11. [Auditar sem model: `Audit::for()`](#auditar-sem-model-auditfor)
-12. [Consultar o histórico](#consultar-o-histórico)
-13. [Mostrar o histórico numa tela Blade](#mostrar-o-histórico-numa-tela-blade)
-14. [Colunas "criado por / alterado por" numa listagem](#colunas-criado-por--alterado-por-numa-listagem)
-15. [Modal de histórico pronto (JavaScript, opcional)](#modal-de-histórico-pronto-javascript-opcional)
-16. [Restaurar um registro apagado](#restaurar-um-registro-apagado)
-17. [Registrar falhas](#registrar-falhas)
-18. [Multitenancy (opcional)](#multitenancy-opcional)
-19. [Desligar a auditoria](#desligar-a-auditoria)
-20. [Configuração completa](#configuração-completa)
-21. [Personalização avançada](#personalização-avançada)
-22. [Problemas comuns](#problemas-comuns)
-23. [Referência rápida](#referência-rápida)
+12. [Update e delete em massa](#update-e-delete-em-massa)
+13. [Consultar o histórico](#consultar-o-histórico)
+14. [Mostrar o histórico numa tela Blade](#mostrar-o-histórico-numa-tela-blade)
+15. [Página de pesquisa de auditoria (receita)](#página-de-pesquisa-de-auditoria-receita)
+16. [Colunas "criado por / alterado por" numa listagem](#colunas-criado-por--alterado-por-numa-listagem)
+17. [Modal de histórico pronto (JavaScript, opcional)](#modal-de-histórico-pronto-javascript-opcional)
+18. [Restaurar um registro apagado](#restaurar-um-registro-apagado)
+19. [Registrar falhas](#registrar-falhas)
+20. [Multitenancy (opcional)](#multitenancy-opcional)
+21. [Desligar a auditoria](#desligar-a-auditoria)
+22. [Configuração completa](#configuração-completa)
+23. [Personalização avançada](#personalização-avançada)
+24. [Problemas comuns](#problemas-comuns)
+25. [Referência rápida](#referência-rápida)
 
 ---
 
@@ -69,19 +73,35 @@ como esta:
 
 ## Instalação
 
-Rode os quatro comandos abaixo na pasta do seu projeto:
+Só dois comandos são necessários: `composer require` e `php artisan migrate`.
+Os dois `vendor:publish` no meio são opcionais. Rode na pasta do seu projeto:
 
 ```bash
 composer require gsebastiao/laravel-auditable
 ```
 
 ```bash
-php artisan vendor:publish --tag=auditable-config
+php artisan vendor:publish --tag=auditable-config   # opcional
 ```
 
+> **Este comando é opcional — pode pular.** Ele só copia o arquivo de
+> configuração do pacote para o seu projeto (`config/auditable.php`), para você
+> poder editá-lo. O pacote funciona igual sem ele, com os valores padrão. E se
+> um dia quiser mudar alguma opção (nome da tabela, banco, multitenancy...),
+> também não precisa dele: basta acrescentar variáveis `AUDITABLE_*` ao `.env`.
+> Veja todas as opções e variáveis em [Configuração completa](#configuração-completa).
+
 ```bash
-php artisan vendor:publish --tag=auditable-migrations
+php artisan vendor:publish --tag=auditable-migrations   # opcional
 ```
+
+> **Este comando também é opcional — a maioria dos projetos pode pular.** O
+> pacote já traz a migration da tabela de auditoria e o `php artisan migrate`
+> (o próximo comando) a executa sozinho, sem encher a pasta
+> `database/migrations` do seu projeto. Só publique se quiser **editar** a
+> migration antes de rodá-la — o caso típico é quando os ids dos seus models
+> (ou dos usuários) são **UUID ou ULID**. Veja
+> [Meus ids são UUID](#meus-ids-são-uuid-ou-ulid).
 
 ```bash
 php artisan migrate
@@ -91,15 +111,15 @@ O que cada um faz:
 
 1. **`composer require`** instala o pacote. O Laravel o encontra sozinho; não
    precisa registrar nada.
-2. **`--tag=auditable-config`** cria `config/auditable.php`, com todas as
-   opções comentadas. Você só mexe nele se quiser mudar algum padrão.
-3. **`--tag=auditable-migrations`** cria em `database/migrations/` o arquivo
-   que monta a tabela de auditoria.
+2. **`--tag=auditable-config`** (**opcional**) cria `config/auditable.php`, com
+   todas as opções comentadas. Veja a explicação acima e a
+   [Configuração completa](#configuração-completa).
+3. **`--tag=auditable-migrations`** (**opcional**) copia a migration para
+   `database/migrations/`, para você poder editá-la. Veja a explicação acima.
 4. **`migrate`** cria a tabela (chamada `audit_table`, por padrão).
 
-> **Os ids dos seus models são UUID ou ULID?** Antes do passo 4, abra a
-> migration criada no passo 3 e troque `'integer'` por `'uuid'` ou `'ulid'` nas
-> três linhas do topo do arquivo. Veja [Meus ids são UUID](#meus-ids-são-uuid-ou-ulid).
+> **Vai mudar o nome da tabela** (`AUDITABLE_TABLE`) **ou ligar o
+> multitenancy?** Faça-o **antes** do `migrate`.
 
 ---
 
@@ -201,15 +221,17 @@ A auditoria automática funciona pelos **eventos do Eloquent**. Por isso:
 | `$produto->increment('estoque')` | `$produto->saveQuietly()` e código dentro de `Model::withoutEvents()` |
 | `$produto->restore()` (SoftDeletes) | |
 
-Se você precisa auditar uma escrita da coluna da direita, há dois caminhos:
+Para updates e deletes **em massa**, use as versões auditadas — a sintaxe é a
+mesma, e cada registro afetado ganha a sua auditoria (veja
+[Update e delete em massa](#update-e-delete-em-massa)):
 
 ```php
-// 1) Percorrer os models (mais lento, mas cada um gera a sua auditoria)
-Produto::where('categoria_id', 3)->each(fn (Produto $p) => $p->update(['ativo' => false]));
-
-// 2) Fazer a escrita em massa e registrar você mesmo com Audit::for()
-//    (veja "Auditar sem model")
+Produto::where('categoria_id', 3)->auditedUpdate(['ativo' => false]);
+Produto::where('categoria_id', 3)->auditedDelete();
 ```
+
+Para o resto da coluna da direita (`DB::table()`, tabelas sem model),
+registre você mesmo com [`Audit::for()`](#auditar-sem-model-auditfor).
 
 ---
 
@@ -359,21 +381,23 @@ exemplo, um usuário chamado "Sistema" com id 1), coloque no `.env`:
 AUDITABLE_DEFAULT_CREATED_BY=1
 ```
 
-**Usa outro guard de login** (ex.: `admin`)? Ajuste em `config/auditable.php`:
+**Usa outro guard de login** (ex.: `admin`)? Coloque no `.env`:
 
-```php
-'auth_guard' => 'admin',
+```dotenv
+AUDITABLE_AUTH_GUARD=admin
 ```
 
-**Numa job da fila** ninguém está logado. Para registrar o usuário que pediu a
-tarefa, passe o id dele para a job e use [`audit()`](#personalizar-a-entrada-automática-audit)
+**Num job da fila** ninguém está logado, mas o pacote resolve isso sozinho: a
+job leva consigo o usuário que estava logado quando ela foi despachada, e as
+auditorias feitas por ela ficam em nome dele. Vale também para listeners,
+notificações e e-mails em fila. (Para desligar: `'propagate_user' => false`
+na seção `queue` de `config/auditable.php`.)
+
+Para gravar em nome de outra pessoa, use [`audit()`](#personalizar-a-entrada-automática-audit)
 logo depois da gravação:
 
 ```php
-public function handle(): void
-{
-    $pedido = Pedido::create($this->dados)->audit(createdBy: $this->userId);
-}
+$pedido = Pedido::create($dados)->audit(createdBy: $vendedor->id);
 ```
 
 ---
@@ -432,29 +456,27 @@ Pedido::operationsFor(42)->get();
 Audit::inBatch($batch)->get();      // tudo de um batch
 ```
 
-### Continuar a operação numa fila
+### Jobs em fila continuam a operação
 
-Se a operação despacha uma job, passe o batch para ela:
-
-```php
-// Dentro do Audit::transaction():
-EnviarNotaFiscal::dispatch($pedido->id, Audit::currentBatch());
-```
+Não é preciso fazer nada: um job despachado **durante** uma operação continua
+nessa operação. Tudo o que ela gravar recebe o mesmo `batch` — e, como visto em
+[Quem fez a alteração](#quem-fez-a-alteração), o mesmo autor.
 
 ```php
-// Na job:
-public function __construct(public int $pedidoId, public ?string $batch) {}
+Audit::transaction(function () use ($dados) {
+    $pedido = Pedido::create($dados);
 
-public function handle(): void
-{
-    Audit::useBatch($this->batch, function () {
-        // o que for auditado aqui entra na mesma operação
-    });
-}
+    EmitirNotaFiscal::dispatch($pedido->id);   // uma job comum, sem código de auditoria
+});
 ```
 
-`Audit::currentBatch()` devolve `null` fora de uma operação — sem problema:
-nesse caso, `useBatch()` abre uma operação nova.
+Um job despachado **fora** de uma operação começa a sua própria, como uma
+requisição normal. Funciona com qualquer driver de fila (`database`, `redis`,
+`sqs`, `sync`...) e também com listeners, notificações e e-mails em fila. Para
+desligar: `'propagate_batch' => false` na seção `queue` da config.
+
+> Controle manual, se precisar: `Audit::useBatch($batch, fn () => ...)` grava
+> no batch indicado tudo o que estiver dentro do callback.
 
 ---
 
@@ -483,7 +505,7 @@ autor, outro nome de evento ou informações extra. É para isso que existe
 `audit()`:
 
 ```php
-// Outro autor (ex.: numa job da fila)
+// Outro autor (ex.: num job da fila)
 $pedido = Pedido::create($dados)->audit(createdBy: $this->userId);
 
 // Outro nome de evento: em vez de "created", grava "importado"
@@ -555,24 +577,60 @@ Audit::for('pessoa', $id, 'updated')
   `logEmpty()`, `resolveMap()`, `debugInfo()`, `batch()`, `createdBy()`,
   `tenantId()`, `createdAt()` e `updatedAt()`.
 
-Exemplo com um update em massa, tudo numa operação:
+> Para updates e deletes em massa num **model**, prefira `auditedUpdate()` e
+> `auditedDelete()` (veja [Update e delete em massa](#update-e-delete-em-massa)):
+> calculam o "antes" e o "depois" sozinhos.
+
+**`Audit::for()` ou `DB::table()->audit()`?** Use `Audit::for()`. A forma
+`DB::table('x')->audit(...)` existe por compatibilidade e faz o mesmo — a
+tabela do `DB::table()` não é usada para nada. A única diferença é a conexão
+onde o `resolveMap` procura os nomes: a do `DB::connection(...)` usado. Isso
+só importa numa tabela sem model que esteja numa conexão que não é a padrão:
 
 ```php
-$ids = Produto::where('categoria_id', 3)->pluck('id');
-
-Audit::transaction(function () use ($ids) {
-    Produto::whereIn('id', $ids)->update(['ativo' => false]);
-
-    foreach ($ids as $id) {
-        Audit::for(Produto::class, $id, 'updated')
-            ->changes(['ativo' => ['old' => true, 'new' => false]])
-            ->save();
-    }
-});
+DB::connection('legado')->table('pessoas')->audit('pessoa', $id, 'updated')
+    ->changes(['estado_id' => ['old' => 3, 'new' => 7]])
+    ->resolveMap(['estado_id' => ResolveMap::direct('Estado', 'estados')])
+    ->save();
 ```
 
-> Versões anteriores usavam `DB::table('x')->audit(...)`. Continua a funcionar
-> e faz o mesmo que `Audit::for(...)` (a tabela do `DB::table()` não é usada).
+---
+
+## Update e delete em massa
+
+Um `update()` ou `delete()` em massa não gera auditoria (o Laravel não
+dispara os eventos dos models). Use as versões auditadas — a sintaxe é a
+mesma:
+
+```php
+Produto::where('categoria_id', 3)->auditedUpdate(['ativo' => false]);
+
+Produto::where('created_at', '<', now()->subYears(5))->auditedDelete();
+```
+
+Cada registro afetado ganha a sua auditoria, com as mesmas regras de
+`getAuditOptions()` (`resolveMap`, `except`, campos mascarados...), e todas
+ficam na mesma operação. Os dois métodos devolvem quantos registros foram
+afetados, como o `update()` e o `delete()` normais.
+
+**Bom saber**
+
+- O model precisa do trait `Auditable`.
+- Trabalha em lotes de 500 registros. Em cada lote: lê os valores antigos
+  (travando as linhas), faz um único update e grava as auditorias de uma vez.
+  Se um lote falhar, ele volta atrás inteiro — dados e auditorias. Para outro
+  tamanho: `->auditedUpdate([...], chunkSize: 1000)`.
+- Aceita valores calculados pelo banco:
+  `->auditedUpdate(['preco' => DB::raw('preco * 1.1')])`.
+- Registros que já tinham o valor novo não ganham auditoria.
+- Em models com SoftDeletes, `auditedDelete()` manda para a lixeira (como o
+  `delete()`). Em models sem SoftDeletes, o retrato de restauro é gravado e
+  `restore()` funciona como num delete normal.
+- Tal como o `update()` em massa normal, **não dispara os eventos do
+  Eloquent**: observers e listeners de `updated`/`deleted` não correm.
+- É mais lento que o `update()` cru (lê e audita cada registro), mas muito
+  mais rápido do que carregar e salvar os models um a um.
+- Não aceita `limit()`/`offset()`: filtre com `where()`.
 
 ---
 
@@ -603,6 +661,7 @@ Filtros disponíveis (todos encadeáveis, e ainda funcionam `where()`,
 | `inBatch($batch)` | De uma operação |
 | `failures()` | Só as [falhas](#registrar-falhas) |
 | `forRecord(Produto::class, $id)` | De um registro |
+| `filter([...])` | Vários de uma vez — para telas de pesquisa ([veja a receita](#página-de-pesquisa-de-auditoria-receita)) |
 
 Em cada auditoria:
 
@@ -666,6 +725,103 @@ Na view:
 
 Quer um nome mais bonito para um campo (ex.: "Preço" em vez de "Preco")? Use
 `ResolveMap::alias('Preço')` no `resolveMap`.
+
+---
+
+## Página de pesquisa de auditoria (receita)
+
+Uma página para consultar **todas** as auditorias do sistema, com filtros. O
+pacote não traz esta tela pronta — cada sistema tem o seu visual e as suas
+permissões —, mas com o `filter()` ela fica curta. Copie e adapte.
+
+**1. A permissão**, no `boot()` do `AppServiceProvider`:
+
+```php
+use Illuminate\Support\Facades\Gate;
+
+Gate::define('ver-auditoria', fn ($user) => $user->is_admin);
+```
+
+> A auditoria guarda dados de todos os usuários e detalhes técnicos das
+> falhas: esta página é só para administradores.
+
+**2. A rota**, em `routes/web.php`:
+
+```php
+use Gsebastiao\Auditable\Audit;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Route;
+
+Route::get('/auditoria', function (Request $request) {
+    $audits = Audit::filter($request->all())
+        ->with('user')
+        ->latest()
+        ->orderByDesc('id')
+        ->paginate(30)
+        ->withQueryString();
+
+    return view('auditoria.index', ['audits' => $audits]);
+})->middleware('auth')->can('ver-auditoria');
+```
+
+**3. A view**, em `resources/views/auditoria/index.blade.php`:
+
+```blade
+<form method="GET">
+    <select name="model">
+        <option value="">Todos os registros</option>
+        <option value="{{ App\Models\Produto::class }}" @selected(request('model') === App\Models\Produto::class)>Produtos</option>
+        <option value="{{ App\Models\Pedido::class }}" @selected(request('model') === App\Models\Pedido::class)>Pedidos</option>
+    </select>
+    <input name="id" value="{{ request('id') }}" placeholder="Id do registro">
+    <input name="event" value="{{ request('event') }}" placeholder="Evento (ex.: updated)">
+    <input name="user" value="{{ request('user') }}" placeholder="Id do usuário">
+    <input type="date" name="from" value="{{ request('from') }}">
+    <input type="date" name="to" value="{{ request('to') }}">
+    <label><input type="checkbox" name="failures" value="1" @checked(request('failures'))> Só falhas</label>
+    <button>Filtrar</button>
+</form>
+
+<table>
+    <thead>
+        <tr><th>Quando</th><th>Quem</th><th>Registro</th><th>O quê</th><th>Alterações</th></tr>
+    </thead>
+    <tbody>
+        @forelse ($audits as $audit)
+            <tr>
+                <td>{{ $audit->created_at->format('d/m/Y H:i') }}</td>
+                <td>{{ $audit->user?->name ?? 'Sistema' }}</td>
+                <td>{{ class_basename($audit->subject_type) }} #{{ $audit->subject_id }}</td>
+                <td>{{ $audit->event }}</td>
+                <td>
+                    @foreach ($audit->changeLines() as $linha)
+                        {{ $linha }}<br>
+                    @endforeach
+                </td>
+            </tr>
+        @empty
+            <tr><td colspan="5">Nenhuma auditoria encontrada.</td></tr>
+        @endforelse
+    </tbody>
+</table>
+
+{{ $audits->links() }}
+```
+
+As chaves que o `filter()` entende:
+
+| Chave | Filtra por |
+| --- | --- |
+| `user` | Id de quem fez |
+| `event` | Evento (um texto, ou uma lista: `event[]=created&event[]=updated`) |
+| `model` | Classe do model, ou o nome livre usado no `Audit::for()` |
+| `id` | Id do registro (use junto com `model`) |
+| `batch` | Id da operação |
+| `from` / `to` | Período (datas inclusive) |
+| `failures` | `1` = só as falhas |
+
+Campos vazios e chaves desconhecidas (como `page` e `_token`) são ignorados, e
+datas inválidas também — por isso dá para passar `$request->all()` direto.
 
 ---
 
@@ -958,8 +1114,11 @@ pacotes como `stancl/tenancy` e `spatie/laravel-multitenancy` no modo
 multi-banco.
 
 Só não se esqueça de que a **tabela** de auditoria precisa existir em cada
-banco de cliente: coloque a migration publicada junto das migrations dos
-tenants (no `stancl/tenancy`, a pasta `database/migrations/tenant`).
+banco de cliente. Para isso, publique a migration
+(`php artisan vendor:publish --tag=auditable-migrations`) e coloque a cópia
+junto das migrations dos tenants (no `stancl/tenancy`, a pasta
+`database/migrations/tenant`). O `php artisan migrate` normal continua a criar
+também a tabela no banco central, com a migration do pacote.
 
 ### Caso B — um banco só, com uma coluna `tenant_id` em cada tabela
 
@@ -1024,6 +1183,10 @@ Audit::withoutTenantScope()->get();
 - **A coluna tem outro nome?** Mude `'column'` em `config/auditable.php`. Se
   só um model for diferente, defina nele
   `public function tenantColumn(): string { return 'empresa_id'; }`.
+- **Jobs em fila:** no worker ninguém está logado, então um resolver baseado em
+  `auth()` não sabe o tenant — e, sem tenant, as consultas não são filtradas.
+  Para a job ficar no tenant de quem a despachou, ligue
+  `'propagate_tenant' => true` na seção `queue` de `config/auditable.php`.
 - **Não coloque `BelongsToTenant` no model `User`** se o seu resolver usa
   `auth()->user()`: para descobrir o tenant, o Laravel precisaria carregar o
   usuário, que por sua vez precisaria do tenant — um ciclo sem fim.
@@ -1079,23 +1242,63 @@ Para um model específico, deixe a lista de eventos vazia:
 Todas as opções de `config/auditable.php`. Os padrões funcionam; mude só o
 que precisar.
 
-| Opção | Padrão | O que faz |
-| --- | --- | --- |
-| `enabled` | `true` (`AUDITABLE_ENABLED`) | Liga/desliga a auditoria no sistema inteiro |
-| `table` | `audit_table` | Nome da tabela de auditoria (mude antes da migration) |
-| `connection` | `null` (`AUDITABLE_CONNECTION`) | Conexão de banco da auditoria; `null` = a da aplicação |
-| `model` | `Gsebastiao\Auditable\Models\Audit` | Model da tabela de auditoria ([estender](#o-seu-próprio-model-de-auditoria)) |
-| `auth_guard` | `null` | Guard de onde vem o usuário logado; `null` = o padrão |
-| `default_created_by` | `null` (`AUDITABLE_DEFAULT_CREATED_BY`) | Usuário gravado quando ninguém está logado |
-| `user_model` | `null` | Model dos usuários para `$audit->user`; `null` = o do `config/auth.php` |
-| `users_table` | `users` | Tabela de usuários usada pelo `AuditColumnJoiner` |
-| `column_prefix` | `audit_` | Prefixo das colunas do `AuditColumnJoiner` |
-| `tenant.enabled` | `false` (`AUDITABLE_TENANT_ENABLED`) | Liga o [multitenancy por coluna](#multitenancy-opcional) |
-| `tenant.column` | `tenant_id` | Nome da coluna de tenant |
-| `tenant.resolver` | `null` | Classe invocável que devolve o tenant atual |
-| `tenant.strict` | `false` | Sem tenant identificado: `false` vê tudo, `true` não vê nada |
-| `js.publish_path` | `assets/js` | Pasta (dentro de `public/`) do widget JS |
-| `debug.include_database` | `true` (`AUDITABLE_DEBUG_DB`) | Grava conexão, driver e nome do banco nas falhas |
+### Configurar sem publicar o config
+
+**Não é preciso publicar `config/auditable.php`.** O pacote carrega a sua
+configuração sozinho, e cada opção pode ser mudada por uma variável no `.env`.
+Só publique o config se quiser editar o arquivo diretamente.
+
+| Variável do `.env` | Opção | Padrão | O que faz |
+| --- | --- | --- | --- |
+| `AUDITABLE_ENABLED` | `enabled` | `true` | Liga/desliga a auditoria no sistema inteiro |
+| `AUDITABLE_TABLE` | `table` | `audit_table` | Nome da tabela de auditoria (mude antes da migration) |
+| `AUDITABLE_CONNECTION` | `connection` | vazio | Conexão de banco da auditoria; vazio = a da aplicação |
+| `AUDITABLE_MODEL` | `model` | `Gsebastiao\Auditable\Models\Audit` | Model da tabela de auditoria ([estender](#o-seu-próprio-model-de-auditoria)) |
+| `AUDITABLE_AUTH_GUARD` | `auth_guard` | vazio | Guard de onde vem o usuário logado; vazio = o padrão |
+| `AUDITABLE_USER_MODEL` | `user_model` | vazio | Model dos usuários para `$audit->user`; vazio = o do `config/auth.php` |
+| `AUDITABLE_USER_TABLE` | `users_table` | `users` | Tabela de usuários usada pelo `AuditColumnJoiner` |
+| `AUDITABLE_DEFAULT_CREATED_BY` | `default_created_by` | vazio | Usuário gravado quando ninguém está logado |
+| `AUDITABLE_COLUMN_PREFIX` | `column_prefix` | `audit_` | Prefixo das colunas do `AuditColumnJoiner` |
+| `AUDITABLE_TENANT_ENABLED` | `tenant.enabled` | `false` | Liga o [multitenancy por coluna](#multitenancy-opcional) |
+| `AUDITABLE_TENANT_COLUMN` | `tenant.column` | `tenant_id` | Nome da coluna de tenant |
+| `AUDITABLE_TENANT_RESOLVER` | `tenant.resolver` | vazio | Classe invocável que devolve o tenant atual |
+| `AUDITABLE_TENANT_STRICT` | `tenant.strict` | `false` | Sem tenant identificado: `false` vê tudo, `true` não vê nada |
+| `AUDITABLE_PROPAGATE_BATCH` | `queue.propagate_batch` | `true` | Jobs despachadas durante uma operação continuam-na |
+| `AUDITABLE_PROPAGATE_USER` | `queue.propagate_user` | `true` | As auditorias de uma job ficam em nome de quem a despachou |
+| `AUDITABLE_PROPAGATE_TENANT` | `queue.propagate_tenant` | `false` | A job usa o tenant de quem a despachou, se o resolver não identificar nenhum |
+| `AUDITABLE_PUBLISH_PATH` | `js.publish_path` | `assets/js` | Pasta (dentro de `public/`) do widget JS |
+| `AUDITABLE_DEBUG_DB` | `debug.include_database` | `true` | Grava conexão, driver e nome do banco nas falhas |
+
+Exemplo de `.env` — coloque **só as linhas que quiser mudar** (aqui, os
+valores padrão, mais um exemplo de conexão própria):
+
+```dotenv
+AUDITABLE_ENABLED=true
+AUDITABLE_TABLE=audit_table
+AUDITABLE_USER_TABLE=users
+AUDITABLE_COLUMN_PREFIX=audit_
+AUDITABLE_TENANT_ENABLED=false
+AUDITABLE_TENANT_COLUMN=tenant_id
+AUDITABLE_TENANT_STRICT=false
+AUDITABLE_PROPAGATE_BATCH=true
+AUDITABLE_PROPAGATE_USER=true
+AUDITABLE_PROPAGATE_TENANT=false
+AUDITABLE_PUBLISH_PATH=assets/js
+AUDITABLE_DEBUG_DB=true
+
+# Sem valor padrão (só descomente se precisar):
+# AUDITABLE_CONNECTION=auditoria
+# AUDITABLE_AUTH_GUARD=admin
+# AUDITABLE_USER_MODEL=App\Models\Usuario
+# AUDITABLE_DEFAULT_CREATED_BY=1
+# AUDITABLE_TENANT_RESOLVER=App\Support\TenantAtual
+# AUDITABLE_MODEL=App\Models\Auditoria
+```
+
+> **Não deixe uma variável com o valor em branco** (`AUDITABLE_CONNECTION=`):
+> o Laravel a entende como texto vazio, não como "sem valor". Para voltar ao
+> padrão, apague a linha. Com `php artisan config:cache`, rode-o de novo depois
+> de mudar o `.env`.
 
 **Guardar a auditoria noutro banco.** Crie a conexão em `config/database.php`
 e indique-a no `.env` **antes** de rodar a migration:
@@ -1153,6 +1356,10 @@ $this->app->bind(AuditRepository::class, \App\Auditoria\GravarNaFila::class);
 Se o destino não tiver ids, `persist()` pode devolver `null`; nesse caso,
 `audit()` passa a criar sempre uma linha nova.
 
+Para que `auditedUpdate()`/`auditedDelete()` gravem em bloco no seu destino,
+implemente `Gsebastiao\Auditable\Contracts\BulkAuditRepository` (que acrescenta
+o método `persistMany`). Sem ela, o pacote grava linha a linha com `persist()`.
+
 ### Outras peças substituíveis
 
 | Interface | Responsável por | Padrão |
@@ -1171,8 +1378,9 @@ Troque do mesmo jeito: `$this->app->bind(Interface::class, SuaClasse::class);`.
 Confira, nesta ordem:
 
 1. O model tem `use Auditable;`?
-2. A gravação passa pelo Eloquent? Updates e deletes **em massa**, `DB::table()`,
-   `insert()`, `upsert()` e `saveQuietly()` não geram auditoria (veja
+2. A gravação passa pelo Eloquent? Updates e deletes **em massa** (use
+   `auditedUpdate()`/`auditedDelete()`), `DB::table()`, `insert()`, `upsert()`
+   e `saveQuietly()` não geram auditoria (veja
    [o que é auditado](#o-que-é-e-o-que-não-é-auditado-automaticamente)).
 3. Algum valor mudou de verdade? Um `update()` com os mesmos valores não grava
    nada — o Laravel nem chega a salvar. E se só mudaram campos ignorados
@@ -1185,9 +1393,10 @@ Confira, nesta ordem:
 
 ### `created_by` está vazio
 
-Ninguém estava logado (terminal, fila, agendamento). Defina
-`AUDITABLE_DEFAULT_CREATED_BY` ou use `audit(createdBy: ...)`. Veja
-[Quem fez a alteração](#quem-fez-a-alteração).
+Ninguém estava logado quando a gravação aconteceu — por exemplo, num comando
+`artisan` ou numa tarefa agendada. (Jobs despachadas por um usuário logado
+já herdam o autor sozinhas.) Defina `AUDITABLE_DEFAULT_CREATED_BY` ou use
+`audit(createdBy: ...)`. Veja [Quem fez a alteração](#quem-fez-a-alteração).
 
 ### O modal mostra "Não foi possível carregar"
 
@@ -1202,7 +1411,8 @@ de erro do pedido.
 
 ### Meus ids são UUID ou ULID
 
-Antes de rodar `php artisan migrate`, abra a migration publicada e ajuste as
+Antes de rodar `php artisan migrate`, publique a migration
+(`php artisan vendor:publish --tag=auditable-migrations`), abra-a e ajuste as
 três linhas do topo:
 
 ```php
@@ -1267,12 +1477,14 @@ $model->auditAction('aprovado', ['motivo' => '...']);           // linha nova
 $model->auditFailure('cobranca', $e, ['extra' => 1], 'Mensagem'); // falha
 $model->audit(event: 'importado', createdBy: 5);                 // ajusta a entrada automática
 Audit::for('pessoa', $id, 'updated')->changes([...])->save();   // sem model
+Model::where(...)->auditedUpdate(['campo' => 'valor']);          // update em massa, auditado
+Model::where(...)->auditedDelete();                              // delete em massa, auditado
 
 // ── Operações ─────────────────────────────────────────────────────────
 Audit::transaction(fn () => ...);      // transação + mesmo batch
 Audit::batch(fn () => ...);            // só o mesmo batch
 Audit::currentBatch();                 // batch atual (ou null)
-Audit::useBatch($batch, fn () => ...); // continuar um batch (filas)
+Audit::useBatch($batch, fn () => ...); // usar um batch específico (manual)
 Audit::withoutAuditing(fn () => ...);  // não auditar este trecho
 
 // ── Consultar ─────────────────────────────────────────────────────────
@@ -1283,6 +1495,7 @@ $model->batchOf();                                    // id da última operaçã
 
 Audit::action('updated')  Audit::byUser($id)  Audit::inBatch($b)
 Audit::failures()         Audit::forRecord(Model::class, $id)  Audit::withoutTenantScope()
+Audit::filter($request->all())                        // vários filtros (telas de pesquisa)
 
 $audit->user   $audit->subject   $audit->changes   $audit->changeLines()
 $audit->isFailure()   $audit->isRestorable()   $audit->restore()
@@ -1302,7 +1515,7 @@ php artisan vendor:publish --tag=auditable-config       # config/auditable.php
 ```
 
 ```bash
-php artisan vendor:publish --tag=auditable-migrations   # migration da tabela
+php artisan vendor:publish --tag=auditable-migrations   # (opcional) copia a migration, para editá-la
 ```
 
 ```bash
@@ -1315,9 +1528,6 @@ php artisan auditable:publish-js [--path=...] [--force] # widget JS em public/
 
 ```bash
 composer install
-```
-
-```bash
 composer test
 ```
 

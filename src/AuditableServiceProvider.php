@@ -8,19 +8,28 @@ use Gsebastiao\Auditable\Console\Commands\PublishAuditTableJs;
 use Gsebastiao\Auditable\Contracts\AuditRepository;
 use Gsebastiao\Auditable\Contracts\BatchIdGenerator;
 use Gsebastiao\Auditable\Contracts\ContextResolver;
+use Gsebastiao\Auditable\Support\BulkAudit;
 use Gsebastiao\Auditable\Support\ChangeSetBuilder;
 use Gsebastiao\Auditable\Support\DebugInfoCollector;
 use Gsebastiao\Auditable\Support\DefaultContextResolver;
 use Gsebastiao\Auditable\Support\EloquentAuditRepository;
 use Gsebastiao\Auditable\Support\LabelResolver;
 use Gsebastiao\Auditable\Support\QueryBuilderAuditableMacro;
+use Gsebastiao\Auditable\Support\QueueContext;
 use Gsebastiao\Auditable\Support\UlidBatchIdGenerator;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Illuminate\Database\DatabaseManager;
+use Illuminate\Queue\Events\JobExceptionOccurred;
+use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Queue;
 use Illuminate\Support\ServiceProvider;
 
 final class AuditableServiceProvider extends ServiceProvider
 {
+    private const MIGRATION = '2026_01_01_000000_create_audits_table.php';
+
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/auditable.php', 'auditable');
@@ -61,8 +70,20 @@ final class AuditableServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        // DB::table(...)->audit(...) — sempre registrado.
+        // DB::table(...)->audit(...) e Model::where(...)->auditedUpdate()/auditedDelete().
         QueryBuilderAuditableMacro::register();
+        BulkAudit::register();
+
+        // Jobs despachadas levam o batch, o usuário (e, se ligado, o tenant)
+        // de quem as despachou; valem só enquanto a job corre.
+        Queue::createPayloadUsing(fn () => QueueContext::payload());
+
+        $events = $this->app['events'];
+        $events->listen(JobProcessing::class, fn (JobProcessing $event) => QueueContext::jobStarted($event->job));
+        $events->listen(
+            [JobProcessed::class, JobFailed::class, JobExceptionOccurred::class],
+            fn (JobProcessed|JobFailed|JobExceptionOccurred $event) => QueueContext::jobFinished($event->job),
+        );
 
         if (! $this->app->runningInConsole()) {
             return;
@@ -72,8 +93,12 @@ final class AuditableServiceProvider extends ServiceProvider
             __DIR__.'/../config/auditable.php' => config_path('auditable.php'),
         ], 'auditable-config');
 
+        // A migration corre com `php artisan migrate`, mesmo sem ser publicada.
+        // Publicar é opcional: serve para quem quer editá-la (ex.: ids UUID).
+        $this->loadUnpublishedMigrations();
+
         $this->publishes([
-            __DIR__.'/../database/migrations/create_audits_table.php.stub' => $this->migrationPath('create_audits_table'),
+            __DIR__.'/../database/migrations/'.self::MIGRATION => $this->migrationPath(self::MIGRATION),
         ], 'auditable-migrations');
 
         // Widget JS opcional. O destino respeita config('auditable.js.publish_path');
@@ -88,13 +113,32 @@ final class AuditableServiceProvider extends ServiceProvider
     }
 
     /**
-     * Reaproveita o nome de uma migration já publicada — assim publicar de novo
-     * não cria uma segunda migration da mesma tabela.
+     * Carrega a migration do pacote, a não ser que o projeto já tenha uma
+     * cópia publicada (com este nome ou com outro timestamp): nesse caso
+     * vale a cópia do projeto, e a tabela nunca é criada duas vezes.
      */
-    private function migrationPath(string $name): string
+    private function loadUnpublishedMigrations(): void
     {
-        $existing = glob(database_path("migrations/*_{$name}.php")) ?: [];
+        if ($this->publishedMigration(self::MIGRATION) === null) {
+            $this->loadMigrationsFrom(__DIR__.'/../database/migrations/'.self::MIGRATION);
+        }
+    }
 
-        return $existing[0] ?? database_path('migrations/'.date('Y_m_d_His')."_{$name}.php");
+    /** A cópia já publicada no projeto (qualquer timestamp), ou null. */
+    private function publishedMigration(string $file): ?string
+    {
+        $name = substr($file, strlen('2026_01_01_000000_'));
+
+        return (glob(database_path("migrations/*_{$name}")) ?: [])[0] ?? null;
+    }
+
+    /**
+     * Destino da publicação: o mesmo nome do arquivo do pacote (assim o
+     * Laravel o reconhece como a mesma migration), ou a cópia que o projeto
+     * já tem — publicar de novo nunca cria uma segunda migration.
+     */
+    private function migrationPath(string $file): string
+    {
+        return $this->publishedMigration($file) ?? database_path('migrations/'.$file);
     }
 }
