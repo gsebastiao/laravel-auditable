@@ -2,6 +2,36 @@
 
 ## [Não lançado]
 
+---
+
+## [2.2.0] — 2026-09-29
+
+### ⚠️ Mudança que pode exigir ajustes no seu código
+
+- **O `restore()` do SoftDeletes passa a gravar uma só linha.** O Laravel faz
+  um `save()` dentro do `restore()`, e o pacote gravava esse save como
+  `updated` (`deleted_at` → vazio) além do `restored` — a mesma operação
+  aparecia duas vezes no histórico, e em batches diferentes quando não havia
+  um batch aberto. Com `restored` em `events()`, fica agora só a linha
+  `restored`. Se tem código ou relatórios que contavam esse `updated`, passe a
+  olhar para o `restored`.
+
+  Sem `restored` em `events()` (o padrão), nada muda: o restauro continua a
+  ficar registado como `updated`, para nunca ficar sem rasto.
+
+### Testes
+
+- `SoftDeletesTest` cobre o restauro com e sem `restored` em `events()`, um
+  `update()` feito logo a seguir ao restauro e um `restore()` de um registo que
+  não estava na lixeira (em nenhum dos casos um `update()` seguinte fica por
+  gravar). A suíte passou para 121 testes.
+
+---
+
+## [2.1.2] — 2026-09-20
+
+Agrupa as alterações publicadas de 2.0.0 a 2.1.2.
+
 Esta versão corrige bugs encontrados numa revisão completa do pacote (todos
 cobertos agora por testes), simplifica a API e traz um README reescrito para
 iniciantes. Acrescenta também integração automática com filas, updates e

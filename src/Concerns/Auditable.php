@@ -34,6 +34,13 @@ trait Auditable
      */
     protected array $auditOldAttributes = [];
 
+    /**
+     * true entre o `restoring` e o fim do save() que o restore() faz por
+     * dentro. Serve para esse save() não gravar um 'updated' além do
+     * 'restored' (a mesma operação ficava duas vezes no histórico).
+     */
+    protected bool $auditRestoring = false;
+
     public static function bootAuditable(): void
     {
         static::updating(function (Model $model): void {
@@ -42,7 +49,16 @@ trait Auditable
 
         foreach (['created', 'updated', 'deleted'] as $event) {
             static::registerModelEvent($event, function (Model $model) use ($event): void {
-                if ($model->getAuditOptions()->allowsEvent($event)) {
+                $options = $model->getAuditOptions();
+
+                // O save() do restore() fica registado como 'restored', não
+                // como 'updated' — mas só se 'restored' for gravado; senão o
+                // 'updated' é o único rasto do restauro e mantém-se.
+                if ($event === 'updated' && $model->auditRestoring && $options->allowsEvent('restored')) {
+                    return;
+                }
+
+                if ($options->allowsEvent($event)) {
                     app(AuditManager::class)->record($model, $event);
                 }
             });
@@ -50,6 +66,16 @@ trait Auditable
 
         // Só existe com SoftDeletes; e só é gravado se 'restored' estiver em events().
         if (method_exists(static::class, 'restored')) {
+            static::registerModelEvent('restoring', function (Model $model): void {
+                $model->auditRestoring = true;
+            });
+
+            // 'saved' corre sempre no fim do save(), mesmo quando o restore
+            // não muda nada (e não há 'updated'): a marca nunca fica presa.
+            static::saved(function (Model $model): void {
+                $model->auditRestoring = false;
+            });
+
             static::registerModelEvent('restored', function (Model $model): void {
                 if ($model->getAuditOptions()->allowsEvent('restored')) {
                     app(AuditManager::class)->record($model, 'restored');

@@ -342,7 +342,7 @@ public function getAuditOptions(): AuditOptions
 
 | Método | Padrão | Para que serve |
 | --- | --- | --- |
-| `events([...])` | `created`, `updated`, `deleted` | Quais eventos automáticos registrar. Acrescente `restored` se o model usa SoftDeletes. |
+| `events([...])` | `created`, `updated`, `deleted` | Quais eventos automáticos registrar. Acrescente `restored` se o model usa SoftDeletes: o `restore()` fica então numa só linha `restored`. Sem ele, o restauro aparece como `updated` (`deleted_at` → vazio). |
 | `only([...])` | todos os campos | Registrar **só** estes campos. |
 | `except([...])` | `password`, `remember_token` | Não mostrar estes campos em `changes`. O que você passar **soma-se** ao padrão. |
 | `neverSnapshot([...])` | `password`, `remember_token` | Nunca guardar estes campos em lugar nenhum (nem em `changes`, nem no retrato de restauro). Use para segredos. |
